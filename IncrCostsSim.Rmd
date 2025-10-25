@@ -1,0 +1,295 @@
+---
+title:    "Health Economics Methods - Incremental Costs"
+subtitle: "Poisson-Gamma, Gaussian(identity), Gaussian(loglink), Gamma, and Zero-Inflated Gamma"
+author:   "Charité - Universitätsmedizin Berlin, Institut für Public Health\n\n
+           Hans-Aloys Wischmann, Toivo Glatz"
+date:     "** **\n\n
+           Edited: 2025-10-25, Executed: `r Sys.Date()`"
+output:   word_document
+---
+
+## Conventions and Packages
+
+Due to naming conventions that restrict the use of a variable named group, phase is used for intervention and control groups. For all regressions, glm2::glm2() is used as a drop-in replacement for the generic stats::glm(), to benefit from its more robust step-halving approach and thus improved convergence. A 2nd regression fit with valid starting points is always performed, so as to overcome known failures of glm() and glm2() in determining initial parameter estimates, especially for the log-link. Two additioanl regression fits are always performed using mgcv::bam() and glmmTMB::glmmTMB() as alternative implementations from different packages. Finally, the best fit, defined as the one with the minimum AIC, is returned and analyzed.
+
+## Scneario
+
+```{r setup, include = FALSE}
+  # configurable parameters: scope of analysis
+  shift_value  <- 0.01                    # EUR, arbitrary, small positive amount, shift to avoid zero costs
+  num_subjects <- c(250, 500, 1000, 2000) # study population size (total)
+  num_runs     <- 10000                   # number of simulation runs, at least 1000
+  age_min      <-    50                   # target population minimum age
+  age_max      <-    80                   # target population maximum age
+
+  # configurable parameters: realistic, real-world assumptions
+  follow_up_time          <-    1.00 # duration of follow-up time in years
+  rate_pa_ctr             <-    0.10 # rate of events in control group, per year, at age_min
+  rate_pa_int             <-    0.15 # rate of events in intervention group, per year, at age_min
+  mean_cost_per_event_ctr <- 9000.00 # EUR mean cost per event in standard care (control)
+  mean_cost_per_event_int <- 5000.00 # EUR mean cost per event in intervention (intervention)
+  sd_cost_per_event       <- 2000.00 # Standard deviation of cost per event, in either arm
+
+  # ensure that follow-up time * larger of the two rates is smaller than 1
+  if (follow_up_time * max(rate_pa_int, rate_pa_ctr) >= 1.0) {
+    stop("Invalid paramters: Event rate x follow-up time must be smaller than 1")
+  }
+
+  # expected incremental costs, computed from known population parameters
+  expected_cost_diff <- 0.5 * (age_max + age_min) / age_min * follow_up_time * (rate_pa_int * mean_cost_per_event_int - rate_pa_ctr * mean_cost_per_event_ctr) 
+
+  # required libraries and parallel processing infrastructure
+  library(tidyverse)
+  library(flextable)
+  library(mgcv)
+  library(glm2)
+  library(glmmTMB)
+  library(RhpcBLASctl)
+  library(foreach)
+  library(doParallel)
+  library(doRNG)
+  library(ggh4x)
+
+  # utility function to plot in high resolution to *.png file and inline
+  ggplot_font_size = 10 # font size for all texts except for geom_text, in points
+  plot_pdf_png <- function(file_name, aspect_ratio, plot_object, plot_width = 6.7, plot_res = 1200) {
+    themed_object <- plot_object + theme(text = element_text(size = ggplot_font_size), plot.title = element_text(size = ggplot_font_size))
+    pdf(sprintf("%s.pdf", file_name), plot_width, plot_width * aspect_ratio, paper = "a4")
+    print(themed_object); ignore <- dev.off()
+    png(sprintf("%s.png", file_name), width = plot_width, height = plot_width * aspect_ratio, units = "in", res = plot_res)
+    print(themed_object); ignore <- dev.off()
+    knitr::include_graphics(sprintf("%s.png", file_name), dpi = 1200)
+  }
+
+  # set chunk defaults, prepare to simulate in parallel, initialize random numbers
+  knitr::opts_chunk$set(echo = FALSE, fig.width = 6, dpi = 1200, comment = NA)
+  registerDoParallel(makeCluster(get_num_cores()))
+  blas_set_num_threads(get_num_procs() / get_num_cores())
+
+  # set seed for reproducibility
+  set.seed(314159)
+```
+
+### Population
+
+Study population N = `r paste(num_subjects, collapse = ", ")`, with age uniformly distributed between `r age_min` and `r age_max` years
+
+### Intervention
+
+Tele-consultations for timely identification of patients that require hospitalization
+
+### Control
+
+Standard care
+
+### Outcome
+
+Hospitalization costs, during a fixed follow-up period of `r follow_up_time` year(s)
+
+### Modeled Hypothesis
+
+More patients will be hospitalized during the follow-up period, but at a lower cost for each hospitalization.
+
+### Model Parameters
+
+Hospitalization rates of `r rate_pa_ctr` and `r rate_pa_int` per year, in control and intervention, respectively, growing linearly with age, i.e., multiplied by age/`r age_min`.
+
+Gamma distribution for hospitalization costs per event, with mean of `r as.integer(mean_cost_per_event_ctr)` EUR for control and `r as.integer(mean_cost_per_event_int)` EUR for intervention.
+
+Standard deviation of hospitalization costs per event of `r as.integer(sd_cost_per_event)` EUR, in either arm.
+
+All non-hospitalized patients incur zero cost.
+
+Positive costs are computed from the non-negative costs by adding `r shift_value` EUR.
+
+For the first scenario, an index infection is assumed to confer immunity to the participant, at least for the duration of the follow-up, so that the probability of a single hospitalization event is given by the product of the appropriate rate and the follow-up period. For the second scenario, the number of hospitalizations per patient is sampled from a Poisson distribution with the appropriate rate, so that (some) patients will experience more than one hospitalization within the follow-up period.
+
+### True Outcome
+
+Expected difference in cost from true population values: `r expected_cost_diff` EUR, excluding cost of intervention which is not modeled.
+
+## Simulation Results
+
+Within each simulation run, one random sample is created and analyzed by all implemented methods.
+
+```{r simulation}
+  # utility function to compute the standard error for the mean
+  se_mean <- function(vec, na.rm = FALSE) { return(sd(vec, na.rm) / sqrt(sum(!is.na(vec)) - 1.0)) }
+
+  # utility function to extract marginal RD for model evaluated on target population, or NA if model failed to converge
+  rd_target_pop_simple <- function(target_pop, m_costs) {
+    if (is.null(m_costs)) { return(NA) }
+    costs <- target_pop %>% mutate(costs = predict(m_costs, newdata = ., type = "response")) %>%
+      group_by(phase) %>% reframe(costs = mean(costs)) %>% pivot_wider(names_from = phase, values_from = costs)
+    return(costs$int - costs$ctr)
+  }
+
+  # utility function to extract marginal RD for Poisson-Gamma model evaluated on target population, or NA if model(s) failed to converge
+  rd_target_pop_poisson_gamma <- function(target_pop, m_events, m_ecosts) {
+    if (is.null(m_events) || is.null(m_ecosts)) { return(NA) }
+    costs <- target_pop %>% mutate(costs = predict(m_events, newdata = ., type = "response") * predict(m_ecosts, newdata = ., type = "response")) %>%
+        group_by(phase) %>% reframe(costs = mean(costs)) %>% pivot_wider(names_from = phase, values_from = costs)
+    return(costs$int - costs$ctr)
+  }
+
+  # utility function to compute total costs for multiple events, where costs for each event follow a Gamma distribution
+  rgamma_n <- function(n, shape, scale) { return(sum(rgamma(n, shape = shape, scale = scale))) }
+  rgamma_nv <- Vectorize(rgamma_n)
+
+  # utility function to avoid glm/glm2 log-link error "no valid set of coefficients has been found: please supply starting values"
+  glm_start <- function(formula, data, family) {
+    if (family$link == "log") {
+      m0 <- lm(formula, data)
+      c0 <- coef(m0)
+      c0[names(c0) == "(Intercept)"] <- log(mean(predict(m0)))
+      c0[names(c0) != "(Intercept)"] <- 0.0
+      return(c0)
+    }
+    if (family$link == "identity") {
+      return(coef(lm(formula, data)))
+    }
+    return(NULL)
+  }
+
+  # utility function to select best regression fit
+  get_best_model <- function(models) {
+    valid_models <- models[!sapply(models, is.null)]
+    if (length(valid_models) == 0) { return(NULL) }
+    aics <- sapply(valid_models, AIC)
+    if (sum(!is.na(aics)) == 0) { return(NULL) }
+    return(valid_models[[which.min(aics)]])
+  }
+
+  # wrapper function around glm2::glm2, mgcv::bam, and glmmTMB::glmmTMB to select the best of several fits
+  glmx <- function(formula, data, family) {
+    models <- list(NULL, NULL, NULL, NULL)
+    try (models[[1]] <-    glm2(formula, family, data))
+    try (models[[2]] <-    glm2(formula, family, data, start = glm_start(formula, data, family)))
+    try (models[[3]] <-     bam(formula, family, data))
+    try (models[[4]] <- glmmTMB(formula, data, family))
+    return(get_best_model(models))
+  }
+
+  # convert mean and standard deviation to gamma function parameters scale and shape
+  scale_ctr <- sd_cost_per_event * sd_cost_per_event / mean_cost_per_event_ctr
+  shape_ctr <- mean_cost_per_event_ctr / scale_ctr
+  scale_int <- sd_cost_per_event * sd_cost_per_event / mean_cost_per_event_int
+  shape_int <- mean_cost_per_event_int / scale_int
+
+  # target population (parsimonious representation)
+  target_pop <- data.frame(phase = c("ctr", "int"), age = 0.5 * (age_max + age_min))
+
+  # loop over study sample sizes, aggregate cost estimates in data frame all
+  all <- data.frame()
+  for (n in num_subjects) {
+    # run parallel simulations, with results automatically aggregated by foreach()
+    res <- foreach (i = 1:num_runs, .combine = rbind, .packages = c("tidyverse", "glm2", "glmmTMB", "mgcv")) %dorng% { # do not use %dopar%, runif/rpois/rgamma 
+      raw <- data.frame(phase = ifelse(runif(n) < 0.5, "ctr", "int"),                    # model 50/50 randomization to control and intervention arms
+                        age   = runif(n, min = age_min, max = age_max)) %>%              # model uniform distribution of age between age_min and age_max
+        mutate(rate  = ifelse(phase == "ctr", rate_pa_ctr, rate_pa_int) * age / age_min, # model linear increase of hospitalization rate with age
+               shape = ifelse(phase == "ctr", shape_ctr, shape_int),                     # select appropriate shape (computed from mean and SD)
+               scale = ifelse(phase == "ctr", scale_ctr, scale_int))                     # select appropriate scale (computed from mean and SD)
+
+      # single-event scenario
+      raw_s1 <- raw %>%
+        mutate(events = ifelse(runif(n) < follow_up_time * rate, 1, 0), # probability for a single event
+               costs  = rgamma_nv(events, shape, scale),                # sum over costs (Gamma distribution)
+               pcosts = costs + shift_value,                            # strictly positive costs
+               ecosts = ifelse(events > 0, costs / events, 0.0))        # costs per event
+      
+      # multiple-event scenario
+      raw_s2 <- raw %>%
+        mutate(events = rpois(n, follow_up_time * rate),                # Poisson distribution for number of events
+               costs  = rgamma_nv(events, shape, scale),                # sum over costs (Gamma distribution)
+               pcosts = costs + shift_value,                            # strictly positive costs
+               ecosts = ifelse(events > 0, costs / events, 0.0))        # costs per event
+
+      # plot cost distribution for multiple-event scenario (only in first simulation)
+      if (i == 100 && n == max(num_subjects)) {
+        plot_pdf_png("Figure_S1", 0.7,
+          raw_s2 %>% mutate(events = factor(events), phase = str_replace_all(phase, c("ctr" = "Control", "int" = "Intervention"))) %>%
+            ggplot(aes(x = costs, group = events, fill = events)) +
+              geom_histogram(binwidth = 1000) + theme(panel.grid.minor.y = element_blank()) +
+              scale_y_continuous(trans = "log1p", breaks = c(0, 1, 2, 4, 10, 20, 40, 100, 200, 400, 1000)) +
+              labs(x = "Costs [Euro]", y = "Absolute Frequency", fill = "# Events") + facet_wrap(~phase))
+      }
+
+      # estimate number of events and costs per event, combine to estimate total costs per patient
+      m_events <-   lm(events ~ phase + phase:age, data = raw_s1)
+      m_ecosts <- glmx(ecosts ~ phase + phase:age, data = raw_s1 %>% filter(events > 0), family = Gamma(link = "identity"))
+
+      # Gaussian/normal distribution assumption (linear model), gaussian with log-link after shift, gamma after shift, zero-inflated gamma
+      m_gauss_id  <-   lm(costs  ~ phase + phase:age, data = raw_s1)
+      m_gauss_log <- glmx(pcosts ~ phase + phase:age, data = raw_s1, family = gaussian(link = "log"))
+      m_gamma     <- glmx(pcosts ~ phase + phase:age, data = raw_s1, family = Gamma(link = "identity"))
+
+      # compute estimated cost difference for all regression models
+      Gauss_id  <- rd_target_pop_simple(target_pop, m_gauss_id)
+      Gauss_log <- rd_target_pop_simple(target_pop, m_gauss_log)
+      Gamma     <- rd_target_pop_simple(target_pop, m_gamma)
+      ziGamma   <- rd_target_pop_poisson_gamma(target_pop, m_events, m_ecosts)
+      res_s1 <- data.frame(Scenario = "Single-Event", Gauss_id, Gauss_log, Gamma, ziGamma)
+
+      # estimate number of events and costs per event, combine to estimate total costs per patient
+      m_events <- glmx(events ~ phase + phase:age, data = raw_s2,                        family = poisson(link = "identity"))
+      m_ecosts <- glmx(ecosts ~ phase + phase:age, data = raw_s2 %>% filter(events > 0), family =   Gamma(link = "identity"))
+
+      # Gaussian/normal distribution assumption (linear model), gaussian with log-link after shift, gamma after shift, zero-inflated gamma
+      m_gauss_id  <-   lm(costs  ~ phase + phase:age, data = raw_s2)
+      m_gauss_log <- glmx(pcosts ~ phase + phase:age, data = raw_s2, family = gaussian(link = "log"))
+      m_gamma     <- glmx(pcosts ~ phase + phase:age, data = raw_s2, family =    Gamma(link = "identity"))
+
+      # compute estimated cost difference for all regression models
+      Gauss_id  <- rd_target_pop_simple(target_pop, m_gauss_id)
+      Gauss_log <- rd_target_pop_simple(target_pop, m_gauss_log)
+      Gamma     <- rd_target_pop_simple(target_pop, m_gamma)
+      ziGamma   <- rd_target_pop_poisson_gamma(target_pop, m_events, m_ecosts)
+      res_s2 <- data.frame(Scenario = "Multi-Event", Gauss_id, Gauss_log, Gamma, ziGamma)
+
+      # return table of estimates
+      rbind(res_s1, res_s2)
+    }
+
+    # aggregate table of estimates across study sample sizes
+    all <- rbind(all, res %>% mutate(N = n))
+  }
+
+  # subtracted true value, compute Bias, Mean Absolute Error (MAE), Root Mean Square Error (RMSE)
+  res <- all %>% mutate(across(!c(Scenario, N), ~.x - expected_cost_diff))
+  results_all <- foreach (i = 1:2, .combine = rbind, .packages = c("tidyverse")) %dopar% {
+    n <- as.integer(num_runs / 10^(i-1))
+    conv <- res %>% group_by(Scenario, N) %>% reframe(across(everything(), ~100.0 * sum(!is.na(.x[1:n])))/n())            %>% mutate(S = n, eval = "Converged [%]")
+    bias <- res %>% group_by(Scenario, N) %>% reframe(across(everything(), ~mean(.x[1:n],                na.rm = TRUE)))  %>% mutate(S = n, eval = "Bias")
+    b_se <- res %>% group_by(Scenario, N) %>% reframe(across(everything(), ~se_mean(.x[1:n],             na.rm = TRUE)))  %>% mutate(S = n, eval = "SE(Bias)")
+    mae  <- res %>% group_by(Scenario, N) %>% reframe(across(everything(), ~mean(abs(.x[1:n]),           na.rm = TRUE)))  %>% mutate(S = n, eval = "MAE")
+    rmse <- res %>% group_by(Scenario, N) %>% reframe(across(everything(), ~sqrt(mean(.x[1:n] * .x[1:n], na.rm = TRUE)))) %>% mutate(S = n, eval = "RMSE")
+    rbind(bias, b_se, mae, rmse, conv)
+  }
+  results_all <- results_all %>% setNames(str_replace_all(names(.), c("_id" = "(id)", "_log" = "(log)"))) %>% mutate(S = sprintf("%d Simulations", S)) %>%
+    mutate(S = fct_inorder(S), eval = factor(eval, levels = c("Bias", "SE(Bias)", "MAE", "RMSE", "Converged [%]")))
+
+  # summary figure
+  plot_pdf_png("Figure_1", 0.7,
+    results_all %>% pivot_longer(!c(eval, N, Scenario, S)) %>% filter(!eval %in% c("SE(Bias)", "Converged [%]")) %>% mutate(name = fct_inorder(name)) %>%
+      ggplot(aes(x = N, y = value, color = name, linetype = Scenario)) +
+        geom_point() + geom_line() +
+        scale_x_continuous(trans = "log10", breaks = num_subjects) +
+        labs(x = "Study Population Size (N)", y = "Errors [EUR]", color = "Method", linetype = "Scenario") +
+        theme(legend.position = "top", legend.direction = "horizontal", legend.box = "vertical") +
+        facet_grid2(vars(S), vars(eval), scales = "free_y", independent = "y") +
+        facetted_pos_scales(y = list(eval == "Bias" ~ scale_y_continuous(limits = c(-40.0,  40.0), breaks = seq(-40, 40, 20)),
+                                     eval == "MAE"  ~ scale_y_continuous(limits = c(100.0, 400.0), trans = "log10", breaks = c(100, 150, 200, 300, 400)),
+                                     eval == "RMSE" ~ scale_y_continuous(limits = c(100.0, 400.0), trans = "log10", breaks = c(100, 150, 200, 300, 400)))))
+
+  # summary tables for supplementary materials, for maximum number of simulations only
+  results_all <- results_all %>% filter(S == sprintf("%d Simulations", num_runs)) %>% select(-S) %>%
+    select(Metric = eval, N, everything()) %>% arrange(Metric, N) %>% mutate(across(!c(Metric, N, Scenario), ~round(.x, 2)))
+  results_all %>% filter(Scenario == "Single-Event") %>% select(-Scenario) %>%
+    flextable() %>%
+      set_caption(sprintf("Table S1: Bias, Mean Absolute Error (MAE), Root Mean Square Error (RMSE), in EUR, single-event scenario, %d simulations", num_runs)) %>%
+      autofit() %>% align(j = 2:6, align = "right") %>% hline(c(4, 8, 12, 16))
+  results_all %>% filter(Scenario == "Multi-Event") %>% select(-Scenario) %>%
+    flextable() %>%
+      set_caption(sprintf("Table S2: Bias, Mean Absolute Error (MAE), Root Mean Square Error (RMSE), in EUR, multi-event scenario, %d simulations", num_runs)) %>%
+      autofit() %>% align(j = 2:6, align = "right") %>% hline(c(4, 8, 12, 16))
+```
