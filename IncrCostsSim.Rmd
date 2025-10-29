@@ -1,18 +1,18 @@
 ---
 title:    "Health Economics Methods - Incremental Costs"
 subtitle: "Poisson-Gamma, Gaussian(identity), Gaussian(loglink), Gamma, and Zero-Inflated Gamma"
-author:   "Charité - Universitätsmedizin Berlin, Institut für Public Health\n\n
-           Hans-Aloys Wischmann, Toivo Glatz"
+author:   "Anonymous Institute\n\n
+           Anonymous1, Anonymous2"
 date:     "** **\n\n
-           Edited: 2025-10-25, Executed: `r Sys.Date()`"
+           Edited: 2025-10-29, Executed: `r Sys.Date()`"
 output:   word_document
 ---
 
 ## Conventions and Packages
 
-Due to naming conventions that restrict the use of a variable named group, phase is used for intervention and control groups. For all regressions, glm2::glm2() is used as a drop-in replacement for the generic stats::glm(), to benefit from its more robust step-halving approach and thus improved convergence. A 2nd regression fit with valid starting points is always performed, so as to overcome known failures of glm() and glm2() in determining initial parameter estimates, especially for the log-link. Two additioanl regression fits are always performed using mgcv::bam() and glmmTMB::glmmTMB() as alternative implementations from different packages. Finally, the best fit, defined as the one with the minimum AIC, is returned and analyzed.
+Due to naming conventions that restrict the use of a variable named group, phase is used for intervention and control groups. To benefit from its more robust step-halving approach and thus improved convergence. glm2::glm2() is used as a drop-in replacement for the generic stats::glm(). A 2nd regression fit with valid starting points is always performed, so as to overcome known failures of glm() and glm2() in determining initial parameter estimates, especially for the log-link. Two additional regression fits are always performed using mgcv::bam() and glmmTMB::glmmTMB() as alternative implementations from different packages. Finally, the best fit, defined as the one with the minimum AIC, is returned and analyzed.
 
-## Scneario
+## Scenario
 
 ```{r setup, include = FALSE}
   # configurable parameters: scope of analysis
@@ -52,7 +52,7 @@ Due to naming conventions that restrict the use of a variable named group, phase
 
   # utility function to plot in high resolution to *.png file and inline
   ggplot_font_size = 10 # font size for all texts except for geom_text, in points
-  plot_pdf_png <- function(file_name, aspect_ratio, plot_object, plot_width = 6.7, plot_res = 1200) {
+  plot_pdf_png <- function(file_name, aspect_ratio, plot_object, plot_width = 7.5, plot_res = 1200) {
     themed_object <- plot_object + theme(text = element_text(size = ggplot_font_size), plot.title = element_text(size = ggplot_font_size))
     pdf(sprintf("%s.pdf", file_name), plot_width, plot_width * aspect_ratio, paper = "a4")
     print(themed_object); ignore <- dev.off()
@@ -254,35 +254,33 @@ Within each simulation run, one random sample is created and analyzed by all imp
     all <- rbind(all, res %>% mutate(N = n))
   }
 
-  # subtracted true value, compute Bias, Mean Absolute Error (MAE), Root Mean Square Error (RMSE)
+  # subtract true population effect, compute Bias, Mean Absolute Error (MAE), Root Mean Square Error (RMSE)
   res <- all %>% mutate(across(!c(Scenario, N), ~.x - expected_cost_diff))
-  results_all <- foreach (i = 1:2, .combine = rbind, .packages = c("tidyverse")) %dopar% {
-    n <- as.integer(num_runs / 10^(i-1))
-    conv <- res %>% group_by(Scenario, N) %>% reframe(across(everything(), ~100.0 * sum(!is.na(.x[1:n])))/n())            %>% mutate(S = n, eval = "Converged [%]")
-    bias <- res %>% group_by(Scenario, N) %>% reframe(across(everything(), ~mean(.x[1:n],                na.rm = TRUE)))  %>% mutate(S = n, eval = "Bias")
-    b_se <- res %>% group_by(Scenario, N) %>% reframe(across(everything(), ~se_mean(.x[1:n],             na.rm = TRUE)))  %>% mutate(S = n, eval = "SE(Bias)")
-    mae  <- res %>% group_by(Scenario, N) %>% reframe(across(everything(), ~mean(abs(.x[1:n]),           na.rm = TRUE)))  %>% mutate(S = n, eval = "MAE")
-    rmse <- res %>% group_by(Scenario, N) %>% reframe(across(everything(), ~sqrt(mean(.x[1:n] * .x[1:n], na.rm = TRUE)))) %>% mutate(S = n, eval = "RMSE")
-    rbind(bias, b_se, mae, rmse, conv)
-  }
-  results_all <- results_all %>% setNames(str_replace_all(names(.), c("_id" = "(id)", "_log" = "(log)"))) %>% mutate(S = sprintf("%d Simulations", S)) %>%
-    mutate(S = fct_inorder(S), eval = factor(eval, levels = c("Bias", "SE(Bias)", "MAE", "RMSE", "Converged [%]")))
+  conv <- res %>% group_by(Scenario, N) %>% reframe(across(everything(), ~100.0 * sum(!is.na(.x))) / n())     %>% mutate(eval = "Converged [%]")
+  bias <- res %>% group_by(Scenario, N) %>% reframe(across(everything(), ~mean(.x,           na.rm = TRUE)))  %>% mutate(eval = "Bias")
+  b_se <- res %>% group_by(Scenario, N) %>% reframe(across(everything(), ~se_mean(.x,        na.rm = TRUE)))  %>% mutate(eval = "SE(Bias)")
+  mae  <- res %>% group_by(Scenario, N) %>% reframe(across(everything(), ~mean(abs(.x),      na.rm = TRUE)))  %>% mutate(eval = "MAE")
+  rmse <- res %>% group_by(Scenario, N) %>% reframe(across(everything(), ~sqrt(mean(.x * .x, na.rm = TRUE)))) %>% mutate(eval = "RMSE")
+  results_all <- rbind(bias, b_se, mae, rmse, conv) %>%
+    setNames(str_replace_all(names(.), c("_id" = "(identity)", "_log" = "(log)", "ziGamma" = "Zero-Inflated Gamma"))) %>%
+    mutate(eval = factor(eval, levels = c("Bias", "SE(Bias)", "MAE", "RMSE", "Converged [%]")))
 
   # summary figure
   plot_pdf_png("Figure_1", 0.7,
-    results_all %>% pivot_longer(!c(eval, N, Scenario, S)) %>% filter(!eval %in% c("SE(Bias)", "Converged [%]")) %>% mutate(name = fct_inorder(name)) %>%
+    results_all %>% pivot_longer(!c(eval, N, Scenario)) %>%
+      filter(!eval %in% c("SE(Bias)", "Converged [%]")) %>% mutate(name = fct_inorder(name)) %>%
       ggplot(aes(x = N, y = value, color = name, linetype = Scenario)) +
         geom_point() + geom_line() +
         scale_x_continuous(trans = "log10", breaks = num_subjects) +
-        labs(x = "Study Population Size (N)", y = "Errors [EUR]", color = "Method", linetype = "Scenario") +
-        theme(legend.position = "top", legend.direction = "horizontal", legend.box = "vertical") +
-        facet_grid2(vars(S), vars(eval), scales = "free_y", independent = "y") +
+        labs(x = "Study Population Size (N)", y = "Errors [EUR]", linetype = "Scenario", color = "Method") +
+        theme(legend.position = "top", legend.direction = "horizontal", legend.title.position = "top") +
+        facet_grid2(vars(), vars(eval), scales = "free_y", independent = "y") +
         facetted_pos_scales(y = list(eval == "Bias" ~ scale_y_continuous(limits = c(-40.0,  40.0), breaks = seq(-40, 40, 20)),
-                                     eval == "MAE"  ~ scale_y_continuous(limits = c(100.0, 400.0), trans = "log10", breaks = c(100, 150, 200, 300, 400)),
-                                     eval == "RMSE" ~ scale_y_continuous(limits = c(100.0, 400.0), trans = "log10", breaks = c(100, 150, 200, 300, 400)))))
+                                     eval == "MAE"  ~ scale_y_continuous(limits = c(100.0, 400.0), trans = "log10", breaks = c(100, 200, 400)),
+                                     eval == "RMSE" ~ scale_y_continuous(limits = c(100.0, 400.0), trans = "log10", breaks = c(100, 200, 400)))))
 
-  # summary tables for supplementary materials, for maximum number of simulations only
-  results_all <- results_all %>% filter(S == sprintf("%d Simulations", num_runs)) %>% select(-S) %>%
+  # summary tables for supplementary materials
+  results_all <- results_all %>%
     select(Metric = eval, N, everything()) %>% arrange(Metric, N) %>% mutate(across(!c(Metric, N, Scenario), ~round(.x, 2)))
   results_all %>% filter(Scenario == "Single-Event") %>% select(-Scenario) %>%
     flextable() %>%
