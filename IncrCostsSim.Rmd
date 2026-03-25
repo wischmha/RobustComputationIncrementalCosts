@@ -1,10 +1,10 @@
 ---
 title:    "Health Economics Methods - Incremental Costs"
-subtitle: "Poisson-Gamma, Gaussian(identity), Gaussian(loglink), Gamma, and Zero-Inflated Gamma"
+subtitle: "Gaussian(identity), Gaussian(loglink), Gamma, and Zero-Inflated Gamma (Poisson-Gamma)"
 author:   "Anonymous Institute\n\n
            Anonymous1, Anonymous2"
 date:     "** **\n\n
-           Edited: 2025-10-29, Executed: `r Sys.Date()`"
+           Edited: 2026-03-25, Executed: `r Sys.Date()`"
 output:   word_document
 ---
 
@@ -52,17 +52,17 @@ Due to naming conventions that restrict the use of a variable named group, phase
 
   # utility function to plot in high resolution to *.png file and inline
   ggplot_font_size = 10 # font size for all texts except for geom_text, in points
-  plot_pdf_png <- function(file_name, aspect_ratio, plot_object, plot_width = 7.5, plot_res = 1200) {
+  plot_pdf_png <- function(file_name, aspect_ratio, plot_object, plot_width = 7.5, plot_res = 600) {
     themed_object <- plot_object + theme(text = element_text(size = ggplot_font_size), plot.title = element_text(size = ggplot_font_size))
     pdf(sprintf("%s.pdf", file_name), plot_width, plot_width * aspect_ratio, paper = "a4")
     print(themed_object); ignore <- dev.off()
     png(sprintf("%s.png", file_name), width = plot_width, height = plot_width * aspect_ratio, units = "in", res = plot_res)
     print(themed_object); ignore <- dev.off()
-    knitr::include_graphics(sprintf("%s.png", file_name), dpi = 1200)
+    knitr::include_graphics(sprintf("%s.png", file_name), dpi = 600)
   }
 
   # set chunk defaults, prepare to simulate in parallel, initialize random numbers
-  knitr::opts_chunk$set(echo = FALSE, fig.width = 6, dpi = 1200, comment = NA)
+  knitr::opts_chunk$set(echo = FALSE, fig.width = 6, dpi = 600, comment = NA)
   registerDoParallel(makeCluster(get_num_cores()))
   blas_set_num_threads(get_num_procs() / get_num_cores())
 
@@ -204,7 +204,7 @@ Within each simulation run, one random sample is created and analyzed by all imp
                pcosts = costs + shift_value,                            # strictly positive costs
                ecosts = ifelse(events > 0, costs / events, 0.0))        # costs per event
 
-      # plot cost distribution for multiple-event scenario (only in first simulation)
+      # plot cost distribution for multiple-event scenario (only in one simulation)
       if (i == 100 && n == max(num_subjects)) {
         plot_pdf_png("Figure_S1", 0.7,
           raw_s2 %>% mutate(events = factor(events), phase = str_replace_all(phase, c("ctr" = "Control", "int" = "Intervention"))) %>%
@@ -255,7 +255,7 @@ Within each simulation run, one random sample is created and analyzed by all imp
   }
 
   # subtract true population effect, compute Bias, Mean Absolute Error (MAE), Root Mean Square Error (RMSE)
-  res <- all %>% mutate(across(!c(Scenario, N), ~.x - expected_cost_diff))
+  res  <- all %>% mutate(across(!c(Scenario, N), ~.x - expected_cost_diff))
   conv <- res %>% group_by(Scenario, N) %>% reframe(across(everything(), ~100.0 * sum(!is.na(.x))) / n())     %>% mutate(eval = "Converged [%]")
   bias <- res %>% group_by(Scenario, N) %>% reframe(across(everything(), ~mean(.x,           na.rm = TRUE)))  %>% mutate(eval = "Bias")
   b_se <- res %>% group_by(Scenario, N) %>% reframe(across(everything(), ~se_mean(.x,        na.rm = TRUE)))  %>% mutate(eval = "SE(Bias)")
