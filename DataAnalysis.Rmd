@@ -1,0 +1,164 @@
+---
+title:    "Patient-level simulation and model comparison for robust incremental cost estimation"
+subtitle: "Online Resource 3: Data Analysis"
+author:   "institute\n\nauthors"
+date:     "** **\n\nEdited: 2026-08-16, Executed: `r Sys.Date()`"
+output:   word_document
+---
+
+## Configuration: Parameters
+
+```{r setup, include = FALSE}
+  # required libraries and parallel processing infrastructure
+  library(tidyverse)
+  library(mgcv)
+  library(glm2)
+  library(glmmTMB)
+  library(RhpcBLASctl)
+  library(foreach)
+  library(doParallel)
+
+  # set chunk defaults, prepare to analyze simulations in parallel (no random numbers)
+  knitr::opts_chunk$set(echo = FALSE, fig.width = 6.0, dpi = 600, comment = NA)
+  registerDoParallel(get_num_cores()); blas_set_num_threads(get_num_cores())
+```
+
+## Robust Regressions
+
+To benefit from its more robust step-halving approach and thus improved convergence. glm2::glm2() is added as a drop-in replacement for the generic stats::glm(). Regression fits using glm() and glm2() are provided with valid starting points, so as to overcome known failures in determining initial parameter estimates. Two additional regression fits are always performed using mgcv::gam() and glmmTMB::glmmTMB() as alternative implementations from different packages. Note that mgcv::bam() is optimized for speed and may be required to handle huge datasets, while mgcv::gam() is optimized for convergence, so that the latter is included into the robust regression wrapper. Finally, the best fit, defined as an AIC equal to the minimum AIC, is determined, and the best such fit is returned.
+
+```{r robust_regressions}
+  # overcomes glm/glm2 (log-link) error "no valid set of coefficients has been found: please supply starting values"
+  glmx_start <- function(formula, data, family) {
+    m <- lm(formula, data)
+    c <- coef(m)
+    if (family$link == "identity") {
+      c[is.na(c)] <- 0.0
+    } else if (family$link == "log") {
+      c[names(c) == "(Intercept)"] <- log(mean(predict(m)))
+      c[names(c) != "(Intercept)"] <- 0.0
+    } else {
+      c[] <- 1.0
+    }
+    return(c)
+  }
+
+  # utility function to select best regression fit, instrumented to track performance
+  get_best_model <- function(m_list) {
+    returned  <- map_lgl(m_list,  ~       !is.null(.x))
+    converged <- map_lgl(m_list,  ~ifelse(!is.null(.x), class(.x)[1] == "lm" || (class(.x)[1] %in% c("glm", "gam") && .x$converged[1]) || (class(.x)[1] == "glmmTMB" && .x$fit$convergence == 0), FALSE))
+    aics      <- map_dbl(m_list,  ~ifelse(!is.null(.x), AIC(.x), NA))
+    valid_aic <- !is.na(aics)
+    if (sum(valid_aic) == 0) { return(NULL) }
+    best_aic <- which.min(aics)
+    m_list[[best_aic]]$returned  <- returned
+    m_list[[best_aic]]$converged <- converged
+    m_list[[best_aic]]$valid_aic <- valid_aic
+    m_list[[best_aic]]$best_aic  <- ifelse(!is.na(aics), aics == min(aics, na.rm = TRUE), FALSE)
+    return(m_list[[best_aic]])
+  }
+
+  # wrapper function around glm, glm2::glm2, mgcv::gam, and glmmTMB::glmmTMB, selecting the best among multiple fits
+  glmx <- function(formula, data, family) {
+    s <- glmx_start(formula, data, family)
+    models <- list(NULL, NULL, NULL, NULL)
+    try (models[[1]] <-     glm(formula, family, data, start = s))
+    try (models[[2]] <-    glm2(formula, family, data, start = s))
+    try (models[[3]] <-     gam(formula, family, data))
+    try (models[[4]] <- glmmTMB(formula, data, family, start = list(beta = s), na.action = na.exclude))
+    return(get_best_model(models))
+  }
+
+  # wrapper to select the best fit among gaussian and poisson, the latter with identity link or log-link, for counts
+  glmx_events <- function(formula, data) {
+    models <- list(NULL, NULL, NULL)
+    try(models[[1]] <-   lm(formula, data))
+    try(models[[2]] <- glmx(formula, data, family = poisson(link = "identity")))
+    try(models[[3]] <- glmx(formula, data, family = poisson(link = "log")))
+    return(get_best_model(models))
+  }
+
+  # wrapper to select the best fit among gamma regressions with identity link or log-link, for positive costs
+  glmx_pcosts <- function(formula, data) {
+    models <- list(NULL, NULL)
+    try(models[[1]] <- glmx(formula, data, family = Gamma(link = "identity")))
+    try(models[[2]] <- glmx(formula, data, family = Gamma(link = "log")))
+    return(get_best_model(models))
+  }
+```
+
+## Data Analysis
+
+```{r analysis}
+  # utility function to extract marginal absolute cost for single stage model evaluated on target population
+  predict_one_stage <- function(pop, m1, label, shift) {
+    costs <- try(pop %>% mutate(costs = predict(m1, newdata = ., type = "response")))
+    if (inherits(costs, "try-error")) { return(NA) }
+    return(costs %>% group_by(study_group) %>% reframe(value = mean(costs) - shift) %>% pivot_wider(names_from = study_group) %>% mutate(difference = intervention - control, label))
+  }
+
+  # utility function to extract marginal absolute cost for Gaussian/Poisson-Gamma model evaluated on target population
+  predict_two_stage <- function(pop, m1, m2, label) {
+    costs <- try(pop %>% mutate(costs = predict(m1, newdata = ., type = "response") * predict(m2, newdata = ., type = "response")))
+    if (inherits(costs, "try-error")) { return(NA) }
+    return(costs %>% group_by(study_group) %>% reframe(value = mean(costs)        ) %>% pivot_wider(names_from = study_group) %>% mutate(difference = intervention - control, label))
+  }
+
+  # load results of data generation for all simulation runs, recover shifts that were applied to turn non-zero costs into positive costs
+  load("./DataGeneration.Rdata")
+  shifts <- study_pops %>% select(pcosts1, pcosts2) %>% reframe(across(everything(), ~min(.x[.x > 0])))
+
+  # define analysis model(s), i.e., regression formula(s): main analysis and sensitivity analysis with interaction term
+  regression_models <- c(main = outcome ~ study_group + age_group, full = outcome ~ study_group * age_group)
+
+  # loop over simulation runs and study sample sizes, aggregate regression cost estimates in data frame all
+  results <- foreach (i = 1:n_sim,           .combine = rbind, .packages = c("tidyverse", "glm2", "mgcv", "glmmTMB")) %:%
+             foreach (j = n_obs,             .combine = rbind, .packages = c("tidyverse", "glm2", "mgcv", "glmmTMB")) %:%
+             foreach (f = regression_models, .combine = rbind, .packages = c("tidyverse", "glm2", "mgcv", "glmmTMB")) %dopar% {
+    # fetch study population by run and analyze the first n observations as specified by n_obs
+    study_pop <- study_pops %>% filter(run == i) %>% head(n = j)
+
+    # gaussian/normal distribution assumption, identity link (pre-defined main model)
+    m_gauss_id   <-   lm(f, data = study_pop %>% rename(outcome = costs))
+
+    # gaussian/normal with log-link and gamma with identity- and log-links, after shifts to positive values
+    m_gauss1_log <- glmx(f, data = study_pop %>% rename(outcome = pcosts1), family = gaussian(link = "log"))
+    m_gauss2_log <- glmx(f, data = study_pop %>% rename(outcome = pcosts2), family = gaussian(link = "log"))
+    m_gamma1_id  <- glmx(f, data = study_pop %>% rename(outcome = pcosts1), family = Gamma(link = "identity"))
+    m_gamma2_id  <- glmx(f, data = study_pop %>% rename(outcome = pcosts2), family = Gamma(link = "identity"))
+    m_gamma1_log <- glmx(f, data = study_pop %>% rename(outcome = pcosts1), family = Gamma(link = "log"))
+    m_gamma2_log <- glmx(f, data = study_pop %>% rename(outcome = pcosts2), family = Gamma(link = "log"))
+
+    # estimate number of events times costs per event (pre-defined adaptive sensitivity analysis), where events may be derived from a constant
+    # rate (leading to a poisson distribution), but may include zero-inflation and/or over-dispersion, so that the best (lowest AIC) of gaussian
+    # and poisson (with identity or log-link) regression fits prevails
+    m_events <- glmx_events(f, data = study_pop %>% rename(outcome = events))
+    m_pcosts <- glmx_pcosts(f, data = study_pop %>% rename(outcome = ecosts) %>% filter(events > 0))
+
+    # compute estimated cost difference for all regression models
+    Gauss_id   <- predict_one_stage(target_pop_sample, m_gauss_id,         "Gaussian\n(identity)", 0.0)
+    Gauss1_log <- predict_one_stage(target_pop_sample, m_gauss1_log,       "Gaussian1\n(log)",     shifts$pcosts1)
+    Gauss2_log <- predict_one_stage(target_pop_sample, m_gauss2_log,       "Gaussian2\n(log)",     shifts$pcosts2)
+    Gamma1_id  <- predict_one_stage(target_pop_sample, m_gamma1_id,        "Gamma1\n(identity)",   shifts$pcosts1)
+    Gamma2_id  <- predict_one_stage(target_pop_sample, m_gamma2_id,        "Gamma2\n(identity)",   shifts$pcosts2)
+    Gamma1_log <- predict_one_stage(target_pop_sample, m_gamma1_log,       "Gamma1\n(log)",        shifts$pcosts1)
+    Gamma2_log <- predict_one_stage(target_pop_sample, m_gamma2_log,       "Gamma2\n(log)",        shifts$pcosts2)
+    ziGamma    <- predict_two_stage(target_pop_sample, m_events, m_pcosts, "Counts*\nGamma")
+
+    # track performance of different regression models (avoid referencing NULL)
+    m_list <- compact(list(m_gauss1_log, m_gauss2_log, m_gamma1_id, m_gamma2_id, m_gamma1_log, m_gamma2_log))
+    returned  <- paste(rowSums(sapply(m_list, function(x) x$returned)),  collapse = "/")
+    converged <- paste(rowSums(sapply(m_list, function(x) x$converged)), collapse = "/")
+    valid_aic <- paste(rowSums(sapply(m_list, function(x) x$valid_aic)), collapse = "/")
+    best_aic  <- paste(rowSums(sapply(m_list, function(x) x$best_aic)),  collapse = "/")
+    
+    # free up memory, return data frame of results
+    rm(study_pop, m_events, m_pcosts, m_gauss_id, m_gauss1_log, m_gauss2_log, m_gamma1_id, m_gamma2_id, m_gamma1_log, m_gamma2_log); invisible(gc(full = TRUE))
+    rbind(ziGamma, Gauss_id, Gauss1_log, Gauss2_log, Gamma1_id, Gamma2_id, Gamma1_log, Gamma2_log) %>% mutate(returned, converged, valid_aic, best_aic, N = j, f = deparse(f))
+  }
+
+  # replace acronyms by speaking names for regression models, save for later post-processing
+  shifts <- shifts %>% reframe(across(everything(), ~sprintf("+%.02f EUR", .x)))
+  results <- results %>% mutate(label = str_replace_all(label, c("1" = sprintf("\n%s", shifts$pcosts1), "2" = sprintf("\n%s", shifts$pcosts2))))
+  save(results, regression_models, file = "./DataAnalysis.Rdata", compress = "xz")
+```

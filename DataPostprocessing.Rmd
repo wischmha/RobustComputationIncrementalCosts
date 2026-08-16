@@ -1,0 +1,136 @@
+---
+title:    "Patient-level simulation and model comparison for robust incremental cost estimation"
+subtitle: "Online Resource 4: Data Postprocessing"
+author:   "institute\n\nauthors"
+date:     "** **\n\nEdited: 2026-08-16, Executed: `r Sys.Date()`"
+output:   word_document
+---
+
+## Configuration: Parameters
+
+```{r setup, include = FALSE}
+  # required libraries
+  library(tidyverse)
+  library(flextable)
+  library(ggh4x)
+
+  # set chunk defaults
+  knitr::opts_chunk$set(echo = FALSE, fig.width = 6.0, dpi = 600, comment = NA)
+
+  # utility function to compute mean value and estimate its confidence interval from bootstrapping, allowing for NA values
+  mean_ci <- function(vec, n_boot = 10000, alpha = 0.01, digits = 2) {
+    v <- vec[!is.na(vec)]
+    n <- length(v)
+    b <- numeric(n_boot)
+    for (i in 1:n_boot) {
+      b[i] <- mean(v[sample(1:n, size = n, replace = TRUE)])
+    }
+    return(sprintf("%.*f [%.*f; %.*f]", digits, mean(v), digits, quantile(b, 0.5 * alpha), digits, quantile(b, 1.0 - 0.5 * alpha)))
+  }
+
+  # utility function to compute root mean squared value and estimate with confidence interval from bootstrapping, allowing for NA values
+  rmsq_ci <- function(vec, n_boot = 10000, alpha = 0.01, digits = 2) {
+    v <- vec[!is.na(vec)]
+    n <- length(v)
+    b <- numeric(n_boot)
+    for (i in 1:n_boot) {
+      b[i] <- sqrt(mean(v[sample(1:n, size = n, replace = TRUE)]^2))
+    }
+    return(sprintf("%.*f [%.*f; %.*f]", digits, sqrt(mean(v*v)), digits, quantile(b, 0.5 * alpha), digits, quantile(b, 1.0 - 0.5 * alpha)))
+  }
+
+  # utility function to plot in high resolution to *.png and *.pdf file and inline (using R markdown syntax)
+  plot_pdf_png <- function(file_name, aspect_ratio, plot_object, plot_width = 6.0, plot_res = 600) {
+    themed_object <- plot_object + theme(text = element_text(size = 10), plot.title = element_text(size = 10))
+    pdf(sprintf("%s.pdf", file_name), width = plot_width, height = plot_width * aspect_ratio, paper = "a4");                 print(themed_object); ignore <- dev.off()
+    png(sprintf("%s.png", file_name), width = plot_width, height = plot_width * aspect_ratio, units = "in", res = plot_res); print(themed_object); ignore <- dev.off()
+    cat(sprintf("![](%s.png)\n", file_name))
+  }
+```
+
+## Data Postprocessing
+
+```{r postprocessing, results = "asis"}
+  # load data generation and data analysis results, plot cost distribution (across all runs), note that ggplot stacks after log-transformation, which is discouraged (and wrong)
+  load("./DataGeneration.Rdata")
+  load("./DataAnalysis.Rdata")
+  plot_pdf_png("Figure_S1", 0.7, plot_width = 10,
+    study_pops %>% filter(costs > 0) %>% mutate(events = factor(events)) %>%
+    ggplot(aes(x = costs, group = events, fill = events)) +
+      geom_histogram(binwidth = 1000.0) + theme(panel.grid.minor.y = element_blank()) + scale_x_continuous(limits = c(0.0, 130000.0)) +
+      labs(x = "Non-Zero Costs [Euro]", y = "Absolute Frequency", fill = "# Events") + facet_wrap(~study_group))
+
+  # check maximum cumulative length of stay, should not exceed follow-up period
+  print(sprintf("Maximum cumulative length of stay found in simulated data: %d days, should be less than %d days (%s)", max(study_pops$cumlos), 365, max(study_pops$cumlos) < 365))
+
+  # report proprortion of participants without events
+  study_pops %>% group_by(study_group) %>% reframe(zero_event = sprintf("%.01f%%", 100.0 * sum(events == 0) / n())) %>% flextable() %>% set_caption("Proportion without events") %>% autofit()
+
+  # loop over analyses (regression model specifications)
+  for (m in 1:length(regression_models)) {
+    m_name <- names(regression_models)[m]
+    print(paste(m_name, regression_models[m], sep = ": "))
+    res <- results %>% filter(f == regression_models[m]) %>% select(-f)
+
+    # analyze robustness of different regression function implementations
+    res %>% filter(label == "Counts*\nGamma") %>% select(N, returned, converged, valid_aic, best_aic) %>% separate_wider_delim(!N, delim = "/", names_sep = "") %>%
+      group_by(N) %>% reframe(across(everything(), ~sum(as.integer(.x)))) %>% pivot_longer(!N, names_to = "Status") %>% pivot_wider(names_from = N, values_from = value) %>%
+      mutate(Model  = factor(str_replace_all(Status, c("[a-zA-Z_]*" = "")), levels = 1:4, labels = c("glm+start", "glm2+start", "gam", "glmmTMB+start"))) %>%
+      mutate(Status = factor(str_replace_all(Status, c("[0-9]*"     = "")), levels = c("returned", "converged", "valid_aic", "best_aic"))) %>%
+      select(Model, Status, everything()) %>% arrange(Model, Status) %>% mutate(Status = str_replace(Status, "best_aic", "(co-)optimum")) %>%
+      flextable() %>%
+        set_caption(sprintf("Table S2 (%s): Convergence of Gauss(log) and Gamma regressions (perfect = %d)", m_name, 6 * n_sim)) %>%
+        autofit() %>% hline(c(4, 8, 12)) %>% align(j = -2:-1, align = "right", part = "body") %>% flextable_to_rmd()
+
+    # ensure reproducibility / comparability between regression models (bootstrapping)
+    set.seed(314159)
+
+    # subtract true population effects (theta), by study group, compute cost difference, Bias and Mean Absolute Error (MAE) (serial execution, to avoid potential issues with random number generators)
+    res  <- res %>% select(-returned, -converged, -valid_aic, -best_aic) %>% mutate(control = control - true_cost$control, intervention = intervention - true_cost$intervention, difference = difference - true_cost$difference)
+    bias <- res %>% mutate(label = fct_inorder(label)) %>% group_by(N, label) %>% reframe(across(everything(), ~mean_ci(    .x)))  %>% mutate(Metric = "Bias")
+    mae  <- res %>% mutate(label = fct_inorder(label)) %>% group_by(N, label) %>% reframe(across(everything(), ~mean_ci(abs(.x)))) %>% mutate(Metric = "MAE")
+    rmse <- res %>% mutate(label = fct_inorder(label)) %>% group_by(N, label) %>% reframe(across(everything(), ~rmsq_ci(    .x)))  %>% mutate(Metric = "RMSE")
+    results_all <- rbind(bias, mae, rmse)
+    results_all %>% select(Metric, N, label, difference)   %>% arrange(Metric, N) %>% pivot_wider(names_from = label, values_from = difference) %>%
+      flextable() %>% set_caption(sprintf("Table S1 (%s, Cost Difference): Bias, Mean Absolute Error (MAE), and Root Mean Squared Error (RMSE) in EUR with 99%%-CIs, %d simulation runs", m_name, n_sim)) %>%
+        autofit() %>% align(j = -1, align = "center", part = "header") %>% align(j = -1, align = "right", part = "body") %>% hline(i = c(4, 8)) %>% flextable_to_rmd()
+    results_all %>% select(Metric, N, label, control)      %>% arrange(Metric, N) %>% pivot_wider(names_from = label, values_from = control) %>%
+      flextable() %>% set_caption(sprintf("Table S1 (%s, Control): Bias, Mean Absolute Error (MAE), and Root Mean Squared Error (RMSE) in EUR with 99%%-CIs, %d simulation runs", m_name, n_sim)) %>%
+        autofit() %>% align(j = -1, align = "center", part = "header") %>% align(j = -1, align = "right", part = "body") %>% hline(i = c(4, 8)) %>% flextable_to_rmd()
+    results_all %>% select(Metric, N, label, intervention) %>% arrange(Metric, N) %>% pivot_wider(names_from = label, values_from = intervention) %>%
+      flextable() %>% set_caption(sprintf("Table S1 (%s, Intervention): Bias, Mean Absolute Error (MAE), and Root Mean Squared Error (RMSE) in EUR with 99%%-CIs, %d simulation runs", m_name, n_sim)) %>%
+        autofit() %>% align(j = -1, align = "center", part = "header") %>% align(j = -1, align = "right", part = "body") %>% hline(i = c(4, 8)) %>% flextable_to_rmd()
+  
+    # summary figures and tables, main results for bias, mean absolute error, and root mean squared error, for the absolute difference in cost
+    plot_pdf_png(sprintf("Figure_1_%s", m_name), 1.0,
+      results_all %>% select(Metric, N, label, difference) %>% mutate(Metric = fct_inorder(Metric)) %>% mutate(mean = as.double(gsub(" .*", "", difference))) %>%
+      ggplot(aes(x = N, y = mean, color = label, shape = label)) +
+        geom_line() + geom_point() + scale_x_continuous(trans = "log10", breaks = unique(res$N)) + scale_shape_manual(values = c(1:2, 5:6, 3:4, 7:8)) +
+        labs(x = "Study population size (N)", y = "Errors [EUR]", color = "", shape = "") +
+        theme(legend.position = "top", legend.direction = "horizontal", legend.title.position = "top", legend.byrow = TRUE) +
+        facet_grid2(vars(), vars(Metric), scales = "free_y", independent = "y") +
+        facetted_pos_scales(y = list(Metric == "MAE"  ~ scale_y_continuous(limits = c(100.0, 560.0), trans = "log10", breaks = c(100, 140, 200, 280, 400, 560)),
+                                     Metric == "RMSE" ~ scale_y_continuous(limits = c(100.0, 560.0), trans = "log10", breaks = c(100, 140, 200, 280, 400, 560)))))
+
+    # quantile-quantile plot for residuals (theta_i - theta), for the absolute difference in cost
+    plot_pdf_png(sprintf("Figure_S2_%s", m_name), 1.0,
+      res %>% select(N, label, difference) %>% mutate(label = fct_inorder(label)) %>%
+      ggplot(aes(sample = difference, color = label, shape = label)) +
+        stat_qq_line() + stat_qq(size = 0.5) + scale_x_continuous(limits = c(-3.5, 3.5), breaks = -3:3) + scale_y_continuous(limits = c(-2500.0, 2500.0)) + scale_shape_manual(values = c(1:2, 5:6, 3:4, 7:8)) +
+        labs(y = "Observed residuals [EUR]", x = "Theoretical distribution of residuals [standard deviations]", color = "", shape = "") +
+        theme(legend.position = "top", legend.direction = "horizontal", legend.title.position = "top", legend.byrow = TRUE) + facet_wrap(~N))
+
+    # scatter plot of residuals (theta_i - theta) across all simulation runs, for each pair of analysis methods, maximum study size
+    residuals <- res %>% filter(N == max(N)) %>% select(difference, label, N)  %>% mutate(run = rep(1:n_sim, each = length(unique(res$label)))) %>% pivot_wider(names_from = label, values_from = difference) %>% select(-run, -N)
+    pairwise  <- data.frame()
+    for (i in 2:length(names(residuals))) {
+      for (j in 1:(i - 1)) {
+        pairwise <- rbind(pairwise, data.frame(x = residuals[,i], y = residuals[,j], names(residuals)[i], names(residuals)[j]) %>% setNames(c("x", "y", "nx", "ny")))
+      }
+    }
+    plot_pdf_png(sprintf("Figure_S3_%s", m_name), 1.0,
+      pairwise %>% mutate(nx = fct_inorder(nx), ny = fct_inorder(ny)) %>%
+      ggplot(aes(x = x, y = y)) + geom_point(size = 0.1) + labs(x = "Residuals [EUR]", y = "Residuals [EUR]") +
+        scale_x_continuous(limits = c(-600, 600), breaks = seq(-400, 400, 400)) + scale_y_continuous(limits = c(-600, 600), breaks = seq(-400, 400, 400)) + facet_grid(vars(nx), vars(ny)))
+  }
+```

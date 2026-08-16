@@ -1,0 +1,121 @@
+---
+title:    "Patient-level simulation and model comparison for robust incremental cost estimation"
+subtitle: "Online Resource 2: Data Generation"
+author:   "institute\n\nauthors"
+date:     "** **\n\nEdited: 2026-08-16, Executed: `r Sys.Date()`"
+output:   word_document
+---
+
+## Configuration: Parameters
+
+```{r setup, include = FALSE}
+  # configurable parameters: scope
+  shifts <- c(0.01, 1.00)           # arbitrary, small positive amounts, in EUR
+  n_obs  <- c(250, 500, 1000, 2000) # study population size (total across groups)
+  n_sim  <- 10000                   # number of simulation runs, at least 1000
+
+  # https://service.destatis.de/bevoelkerungspyramide
+  # https://www.gbe.rki.de/DE/Themen/GesundheitsfoerderungPraeventionUndVersorgung/Gesundheitsversorgung/StationaereVersorgung/InanspruchnahmeKrankenhaus/inanspruchnahmeKrankenhaus_node.html
+  population_prop_age  <- c(age_45_64 = 0.28, age_65_79 = 0.16, age_80_99 = 0.07)  # proportion of population by age group (Germany, 2025)
+  hospitalization_rate <- c(age_45_64 = 0.18, age_65_79 = 0.25, age_80_99 = 0.25)  # hospitalization rate by age group [1/year] (Germany, 2019)
+
+  # https://de.statista.com/statistik/daten/studie/2604/umfrage/durchschnittliche-verweildauer-im-krankenhaus-seit-1992/
+  # https://www.destatis.de/DE/Presse/Pressemitteilungen/2025/11/PD25_398_231.html
+  hospital_length_of_stay <-  7.1   # mean length of hospital stays [days] (Germany, 2024)
+  hospital_stays          <- 17.5e6 # 17.5 million cases in total (Germany, 2024) 
+
+  # https://www.destatis.de/DE/Themen/Gesellschaft-Umwelt/Gesundheit/Krankenhauser/Publikationen/Downloads-Krankenhaeuser/statistischer-bericht-kostennachweis-krankenhaeuser-2120630247005.html
+  cost_per_stay  <- 7316.00                                                # mean cost for each hospital in-patient case [EUR] (Germany, 2024)
+  cost_per_day   <-   28.3e9 / hospital_stays / hospital_length_of_stay    # 28.3 billion EUR for "Sachkosten" excluding "Medizinischer Bedarf" (Germany, 2024)
+  cost_for_Dx_Tx <- cost_per_stay - hospital_length_of_stay * cost_per_day # estimated cost of in-patient diagnostic and therapeutic procedures per stay [EUR]
+
+  # configurable parameters: effects of the hypothetical intervention
+  delta_hospitalization <- c(age_45_64 = +0.08, age_65_79 = +0.12, age_80_99 = +0.12) # +10%   hospitalized after tele-consultation (cf. https://jamanetwork.com/journals/jamaneurology/fullarticle/2849571)
+  delta_length_of_stay  <- c(age_45_64 = -2.84, age_65_79 = -2.84, age_80_99 = -1.42) # [days] hypothetical reduction due to a more timely identification, by age group
+  delta_cost_Dx_Tx      <- -0.50 * cost_for_Dx_Tx                                     # [EUR]  hypothetical reduction due to a more timely identification, by age group (fewer and/or simpler procedures)
+
+  # verify consistency of names (age categories), normalize population proportions to target population of interest
+  if (sum(names(population_prop_age) != names(hospitalization_rate))  != 0) { stop("Inconsistent names (population vs. hospitalization rate") }
+  if (sum(names(population_prop_age) != names(delta_hospitalization)) != 0) { stop("Inconsistent names (population vs. change in hospitalization rate") }
+  if (sum(names(population_prop_age) != names(delta_length_of_stay))  != 0) { stop("Inconsistent names (population vs. change in lenght of stay") }
+  population_prop_age <- round(population_prop_age / sum(population_prop_age), 2) # normalize across population of interest (age 45+)
+
+  # required libraries and chunk defaults
+  library(tidyverse)
+  library(flextable)
+  knitr::opts_chunk$set(echo = FALSE, fig.width = 6.0, dpi = 600, comment = NA)
+```
+
+## Scenarios: PICO
+
+```{r study_population}
+  # target population (summary and parsimonous sample)
+  target_pop <- expand_grid(study_group = c("control", "intervention"), age_index = 1:length(names(population_prop_age))) %>%
+    mutate(age_group = names(population_prop_age)[age_index], prop  = population_prop_age[age_index]) %>%
+    mutate(rate  = hospitalization_rate[age_index]) %>%
+    mutate(ref   =                           (study_group == "intervention") * delta_hospitalization[age_index]) %>%
+    mutate(LoS   = hospital_length_of_stay + (study_group == "intervention") * delta_length_of_stay[age_index])  %>%
+    mutate(DxTx  = cost_for_Dx_Tx          + (study_group == "intervention") * delta_cost_Dx_Tx) %>%
+    mutate(costs = (rate + ref) * (LoS * cost_per_day + DxTx))
+  target_pop_sample <- target_pop[rep(1:nrow(target_pop), times = as.integer(100 * target_pop$prop)),] %>% select(study_group, age_group)
+
+  # expected costs per group and incremental costs, computed from known population parameters
+  true_cost <- target_pop %>% group_by(name = study_group) %>% reframe(value = sum(costs * population_prop_age)) %>% pivot_wider() %>% mutate(difference = intervention - control) %>% mutate(across(everything(), ~round(.x, 2)))
+```
+
+### Population
+Study population sizes of n_obs = `r paste(n_obs, collapse = ", ")`, with demographic proportions by age group of `r population_prop_age` for `r names(population_prop_age)`.
+
+### Intervention
+Hypothetical tele-consultation for timely identification of patients that require in-patient hospital care.
+
+### Control
+Current standard of care, with `r paste(sprintf("%.0f%%", 100.0 * hospitalization_rate), collapse = ", ")` of the population hospitalized at least once in a given year, for a mean duration of `r hospital_length_of_stay` days, costs of `r sprintf("%.02f", cost_per_day)` EUR per day for food and lodging, and mean costs of `r sprintf("%.02f", cost_for_Dx_Tx)` EUR for clinical care including diagnostic and therapeutic procedures.
+
+### Outcome
+Absolute costs incurred by a hospital, including costs for diagnosis and therapy plus variable costs for food and lodging, where the latter are calculated as a fixed cost per day multiplied by the length of stay. Costs and lengths of stay are summed across hospitalizations that occur within a follow-up period of one year.
+
+### Hypotheses
+As a result of the tele-consultation, `r paste(sprintf("%.0f%%", 100.0 * delta_hospitalization), collapse = ", ")` of patients are expected to be identified and referred to in-patient hospital care, in addition to the patients that would have been referred in current care. However, the length-of-stay is assumed to be reduced by `r delta_length_of_stay` days due to the more timely identification, with a lower decrease for the oldest age group, due to higher prevalence of comorbidities and frailty that preclude an early discharge. Similarly, earlier identification is expected to affect the cost for in-hospital clinical care including diagnostic and therapeutic procedures, by `r sprintf("%.01f%%", 100.0 * delta_cost_Dx_Tx / cost_for_Dx_Tx)`. All non-hospitalized patients incur zero cost, i.e., cost of outpatient and follow-up care are not in scope and need to be compared in a separate analysis.
+
+### True Outcome
+Expected absolute difference in cost from true population values: `r true_cost$difference` EUR, excluding costs of the intervention itself, which are not modeled.
+
+### Data Generation: Assumptions
+Constant rate of discharge per day for hospitalized patients, after the first day, leading to a geometric progression for the length of stay. Exponential decay of the probability density function for costs of diagnosis and therapy. Non-negative costs shifted by `r sprintf("%.02f", shifts[1])` EUR or by `r sprintf("%.02f", shifts[2])` EUR to achieve positive costs (for regressions that require positive values).
+
+### Data Generation: Implementation
+For each of the n_sim = `r sprintf("%d", n_sim)` runs, one random study sample is created to later be analyzed by all implemented methods. Data generation is not parallelized, to avoid any potential issues with random number generation. The number of hospitalization events per patient is sampled from a Poisson distribution `rpois()` with the appropriate rate. Patients in the intervention group are sampled using a uniform distribution `runif()` with the appropriate proportions for immediate referral to in-hospital care. The length of each hospital stay is sampled from a geometric distribution `rgeom()` with the appropriate mean. The cost for diagnosis and therapy for each hospital stay is sampled from a (decreasing) exponential distribution `rexp()` with the appropriate mean. Thus, length-of-stay and cost for each hospitalization are right-skewed with tails at longer durations and higher costs, and a small number of patients will experience multiple hospitalizations during the follow-up period, which further increases these tails.
+
+```{r data_generation}
+  # ensure reproducibility
+  set.seed(314159)
+
+  # create all study populations in a single data frame
+  study_pops <- data.frame(run = rep(1:n_sim, each = max(n_obs))) %>%
+    mutate(study_group = ifelse(runif(nrow(.)) < 0.5, "control", "intervention")) %>%
+    mutate(age_group = runif(nrow(.))) %>%
+    mutate(age_group = names(population_prop_age)[1 + as.integer(age_group > population_prop_age[1]) + as.integer(age_group > population_prop_age[1] + population_prop_age[2])]) %>%
+    left_join(., target_pop %>% select(study_group, age_group, rate, ref, LoS, DxTx), by = c("study_group", "age_group")) %>%
+    mutate(events  = map_int(rate, ~rpois(1, .x)) + ifelse(runif(nrow(.)) < ref, 1, 0),         # Poisson distribution for events, plus 1 for some patients after tele-consultation
+           cumlos  = map2_int(events, LoS,  ~sum(rgeom(.x, 1.0 / .y))) + events,                # geometric progression for lengths of stay for each hospitalization, after 1st day
+           costs   = map2_dbl(events, DxTx, ~sum( rexp(.x, 1.0 / .y))) + cost_per_day * cumlos, # exponential decay for cost of diagnostic and therapeutic procedures
+           pcosts1 = costs + shifts[1], # strictly positive costs (1st shift)
+           pcosts2 = costs + shifts[2], # strictly positive costs (2nd shift)
+           ecosts  = costs / pmax(events, 1.0))      # non-negative costs per event
+
+  # save study populations for all simulation runs
+  save(true_cost, target_pop_sample, n_sim, n_obs, study_pops, file = "./DataGeneration.Rdata", compress = "xz")
+
+  # summarize simulated data across all simulation runs
+  study_pops %>% select(-run, -pcosts1, -pcosts2) %>%
+    group_by(study_group, age_group) %>% reframe(cpe = sum(costs)/sum(events), lpe = sum(cumlos[events > 0])/sum(events), across(-cumlos, ~mean(.x)), N = n()) %>%
+    group_by(study_group) %>% mutate(N = sprintf("%.01f%%", 100.0 * N / sum(N))) %>% ungroup() %>%
+    select(study_group, age_group, observed_proportion = N, modeled_rate = rate, modeled_referral = ref, observed_events = events, modeled_LoS = LoS, observed_LoS = lpe, observed_cost = cpe) %>%
+    mutate(across(where(is.double), ~sprintf("%.03f", .x))) %>% setNames(gsub("_", "\n", names(.))) %>%
+    flextable() %>% set_caption("Synopsis across all simulation runs")  %>% hline(i = 3) %>% autofit()
+  
+  # verify recovery of true cost difference (simple regression, ignoring interactions)
+  summary(lm(costs ~ study_group + age_group, data = target_pop, weights = prop))
+  summary(lm(costs ~ study_group + age_group, data = study_pops))
+```

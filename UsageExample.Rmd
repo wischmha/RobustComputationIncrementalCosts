@@ -1,0 +1,192 @@
+---
+title:    "Patient-level simulation and model comparison for robust incremental cost estimation"
+subtitle: "Online Resource 5: Usage Example"
+author:   "institute\n\nauthors"
+date:     "** **\n\nEdited: 2026-08-16, Executed: `r Sys.Date()`"
+output:   word_document
+---
+
+This markdown demonstrates the practical use of our proposed helper functions to estimate incremental costs between an intervention and a control group in a minimal simulated dataset.
+
+- **`glmx_start()`** estimates starting values to overcomes errors (glm, glm2) or suboptimal fits (glmmTMB).
+- **`get_best_model()`** returns the model with the lowest AIC from all valid models (non-NULL, converged, and valid AIC).
+- **`glmx()`** fits multiple regression models using four different packages (`stats::glm(), glm2::glm2(), mgcv::gam(), glmmTMB::glmmTMB()`) and returns the best fitting model.
+- **`glmx_events()`** fits multiple regression models for the first stage of a two stage model (probability of events with non-zero costs) using Gaussian with identity-link and Poisson with both identity & log-link, and returns the best fitting model.
+- **`glmx_pcosts()`** fits multiple regression models for the second stage of a two stage model (positive costs) using Gamma with identity and log-link, and returns the best fitting model.
+- **`predict_one_stage()`** predicts marginal absolute costs and costs differences between groups for a single stage model based on the initial study sample. 
+- **`predict_two_stage()`** predicts marginal absolute costs and costs differences between groups for a two stage model based on the initial study sample.
+
+## Setup and Libraries
+
+```{r setup, include = FALSE}
+# required libraries
+library(tidyverse)
+library(flextable)
+library(mgcv)
+library(glm2)
+library(glmmTMB)
+
+# set chunk defaults
+knitr::opts_chunk$set(
+  echo = FALSE,
+  fig.width = 6.0,
+  dpi = 600,
+  comment = NA
+)
+```
+
+## Robust Regressions
+
+Infrastructure and utility functions (skip ahead to example usage)
+
+```{r robust_regressions}
+# overcomes glm/glm2 (log-link) error "no valid set of coefficients has been found: please supply starting values"
+glmx_start <- function(formula, data, family) {
+  m <- lm(formula, data)
+  c <- coef(m)
+  if (family$link == "identity") {
+    c[is.na(c)] <- 0.0
+  } else if (family$link == "log") {
+    c[names(c) == "(Intercept)"] <- log(mean(predict(m)))
+    c[names(c) != "(Intercept)"] <- 0.0
+  } else {
+    c[] <- 1.0
+  }
+  return(c)
+}
+
+# utility function to select best regression fit, instrumented to track performance
+get_best_model <- function(m_list) {
+  returned  <- map_lgl(m_list, ~       !is.null(.x))
+  converged <- map_lgl(m_list, ~ ifelse(
+    !is.null(.x),
+    class(.x)[1] == "lm" ||
+      (class(.x)[1] %in% c("glm", "gam") &&
+         .x$converged[1]) ||
+      (class(.x)[1] == "glmmTMB" && .x$fit$convergence == 0),
+    FALSE
+  ))
+  aics      <- map_dbl(m_list, ~ ifelse(!is.null(.x), AIC(.x), NA))
+  valid_aic <- !is.na(aics)
+  if (sum(valid_aic) == 0) {
+    return(NULL)
+  }
+  best_aic <- which.min(aics)
+  m_list[[best_aic]]$returned  <- returned
+  m_list[[best_aic]]$converged <- converged
+  m_list[[best_aic]]$valid_aic <- valid_aic
+  m_list[[best_aic]]$best_aic  <- ifelse(!is.na(aics), aics == min(aics, na.rm = TRUE), FALSE)
+  return(m_list[[best_aic]])
+}
+
+# wrapper function around glm, glm2::glm2, mgcv::gam, and glmmTMB::glmmTMB, selecting the best among multiple fits
+glmx <- function(formula, data, family) {
+  s <- glmx_start(formula, data, family)
+  models <- list(NULL, NULL, NULL, NULL)
+  try (models[[1]] <-     glm(formula, family, data, start = s))
+  try (models[[2]] <-    glm2(formula, family, data, start = s))
+  try (models[[3]] <-     gam(formula, family, data))
+  try (models[[4]] <- glmmTMB(formula,
+                              data,
+                              family,
+                              start = list(beta = s),
+                              na.action = na.exclude))
+  return(get_best_model(models))
+}
+
+# wrapper to select the best fit among gaussian and poisson, the latter with identity link or log-link, for counts
+glmx_events <- function(formula, data) {
+  models <- list(NULL, NULL, NULL)
+  try(models[[1]] <-   lm(formula, data))
+  try(models[[2]] <- glmx(formula, data, family = poisson(link = "identity")))
+  try(models[[3]] <- glmx(formula, data, family = poisson(link = "log")))
+  return(get_best_model(models))
+}
+
+# wrapper to select the best fit among gamma regressions with identity link or log-link, for positive costs
+glmx_pcosts <- function(formula, data) {
+  models <- list(NULL, NULL)
+  try(models[[1]] <- glmx(formula, data, family = Gamma(link = "identity")))
+  try(models[[2]] <- glmx(formula, data, family = Gamma(link = "log")))
+  return(get_best_model(models))
+}
+
+# utility function to extract marginal absolute cost for single stage model evaluated on population
+predict_one_stage <- function(pop, m1, label, shift) {
+  costs <- try(pop %>% mutate(costs = predict(m1, newdata = ., type = "response")))
+  if (inherits(costs, "try-error")) {
+    return(NA)
+  }
+  return(
+    costs %>%
+      group_by(study_group) %>%
+      reframe(value = mean(costs) - shift) %>%
+      pivot_wider(names_from = study_group) %>%
+      mutate(difference = intervention - control, label)
+  )
+}
+
+# utility function to extract marginal absolute cost for Gaussian/Poisson-Gamma model evaluated on population
+predict_two_stage <- function(pop, m1, m2, label) {
+  costs <- try(pop %>% mutate(costs = predict(m1, newdata = ., type = "response") * predict(m2, newdata = ., type = "response")))
+  if (inherits(costs, "try-error")) {
+    return(NA)
+  }
+  return(
+    costs %>%
+      group_by(study_group) %>%
+      reframe(value = mean(costs)) %>%
+      pivot_wider(names_from = study_group) %>%
+      mutate(difference = intervention - control, label)
+  )
+}
+```
+
+## Dataset
+
+```{r dataset}
+# ensure reproducibility
+set.seed(3.14159)
+
+# fictitious study population (single observation sample)
+study_pop <- expand.grid(study_group = c("control", "intervention"), age = seq(40, 99, 0.01)) %>%
+  mutate(events = map_int(study_group, ~ rpois(1, 0.200 + 0.100 * (.x == "intervention")))) %>%
+  mutate(ecosts = map_dbl(study_group, ~ rexp (1, 0.005 + 0.002 * (.x == "intervention"))) * exp(0.01 * age)) %>%
+  mutate(costs  = events * ecosts)
+
+study_pop %>%
+  group_by(study_group) %>%
+  reframe(across(everything(), ~ mean(.x))) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 2))) %>%
+  flextable() %>%
+  autofit() %>%
+  set_caption("Mean values")
+```
+
+Mean cost difference: `r study_pop %>% group_by(study_group) %>% reframe(mean = mean(costs)) %>% reframe(diff = round(mean[study_group == "intervention"] - mean[study_group == "control"], 2)) %>% pull("diff")`
+
+## Example Usage
+
+**Note:** Warnings are expected as we anticipate some models to fail
+
+```{r example}
+# Gaussian identity link
+m_Gauss  <- lm(costs ~ study_group + age, data = study_pop)
+# Gamma log link after shift by 0.01 EUR
+m_Gamma  <- glmx(pcosts ~ study_group + age,
+                 family = Gamma(link = "log"),
+                 data = study_pop %>% mutate(pcosts = costs + 0.01))
+# two-stage model
+m_Events <- glmx_events(events ~ study_group + age, data = study_pop)
+m_Ecosts <- glmx_pcosts(ecosts ~ study_group + age, data = study_pop %>% filter(events > 0))
+
+# compute estimated costs and cost difference for all regression models including reversion of the 0.01 EUR shift
+Gauss_id  <- predict_one_stage(study_pop, m_Gauss, "Single-stage: Gaussian (identity link)", 0.00)
+Gamma_log <- predict_one_stage(study_pop, m_Gamma, "Single-stage: Gamma (log link)", 0.01)
+ziGamma   <- predict_two_stage(study_pop, m_Events, m_Ecosts, "Two-stage: Counts * Gamma")
+rbind(Gauss_id, Gamma_log, ziGamma) %>%
+  mutate(across(where(is.numeric), ~ sprintf("%.02f", .x))) %>%
+  flextable() %>%
+  autofit() %>%
+  set_caption("Costs from regressions")
+```
