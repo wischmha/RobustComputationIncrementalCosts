@@ -1,8 +1,8 @@
 ---
 title:    "Patient-level simulation and model comparison for robust incremental cost estimation"
 subtitle: "Online Resource 5: Usage Example"
-author:   "institute\n\nauthors"
-date:     "** **\n\nEdited: 2026-08-16, Executed: `r Sys.Date()`"
+author:   "Charité - Universitätsmedizin Berlin\n\nInstitute of Public Health\n\nHans-Aloys Wischmann, Toivo Glatz"
+date:     "** **\n\nEdited: 2026-08-17, Executed: `r Sys.Date()`"
 output:   word_document
 ---
 
@@ -27,12 +27,7 @@ library(glm2)
 library(glmmTMB)
 
 # set chunk defaults
-knitr::opts_chunk$set(
-  echo = FALSE,
-  fig.width = 6.0,
-  dpi = 600,
-  comment = NA
-)
+knitr::opts_chunk$set(echo = FALSE, fig.width = 6.0, dpi = 600, comment = NA)
 ```
 
 ## Robust Regressions
@@ -58,19 +53,10 @@ glmx_start <- function(formula, data, family) {
 # utility function to select best regression fit, instrumented to track performance
 get_best_model <- function(m_list) {
   returned  <- map_lgl(m_list, ~       !is.null(.x))
-  converged <- map_lgl(m_list, ~ ifelse(
-    !is.null(.x),
-    class(.x)[1] == "lm" ||
-      (class(.x)[1] %in% c("glm", "gam") &&
-         .x$converged[1]) ||
-      (class(.x)[1] == "glmmTMB" && .x$fit$convergence == 0),
-    FALSE
-  ))
-  aics      <- map_dbl(m_list, ~ ifelse(!is.null(.x), AIC(.x), NA))
+  converged <- map_lgl(m_list, ~ifelse(!is.null(.x), class(.x)[1] == "lm" || (class(.x)[1] %in% c("glm", "gam") && .x$converged[1]) || (class(.x)[1] == "glmmTMB" && .x$fit$convergence == 0), FALSE))
+  aics      <- map_dbl(m_list, ~ifelse(!is.null(.x), AIC(.x), NA))
   valid_aic <- !is.na(aics)
-  if (sum(valid_aic) == 0) {
-    return(NULL)
-  }
+  if (sum(valid_aic) == 0) { return(NULL) }
   best_aic <- which.min(aics)
   m_list[[best_aic]]$returned  <- returned
   m_list[[best_aic]]$converged <- converged
@@ -86,11 +72,7 @@ glmx <- function(formula, data, family) {
   try (models[[1]] <-     glm(formula, family, data, start = s))
   try (models[[2]] <-    glm2(formula, family, data, start = s))
   try (models[[3]] <-     gam(formula, family, data))
-  try (models[[4]] <- glmmTMB(formula,
-                              data,
-                              family,
-                              start = list(beta = s),
-                              na.action = na.exclude))
+  try (models[[4]] <- glmmTMB(formula, data, family, start = list(beta = s), na.action = na.exclude))
   return(get_best_model(models))
 }
 
@@ -114,31 +96,15 @@ glmx_pcosts <- function(formula, data) {
 # utility function to extract marginal absolute cost for single stage model evaluated on population
 predict_one_stage <- function(pop, m1, label, shift) {
   costs <- try(pop %>% mutate(costs = predict(m1, newdata = ., type = "response")))
-  if (inherits(costs, "try-error")) {
-    return(NA)
-  }
-  return(
-    costs %>%
-      group_by(study_group) %>%
-      reframe(value = mean(costs) - shift) %>%
-      pivot_wider(names_from = study_group) %>%
-      mutate(difference = intervention - control, label)
-  )
+  if (inherits(costs, "try-error")) { return(NA) }
+  return(costs %>% group_by(study_group) %>% reframe(value = mean(costs) - shift) %>% pivot_wider(names_from = study_group) %>% mutate(difference = intervention - control, label))
 }
 
 # utility function to extract marginal absolute cost for Gaussian/Poisson-Gamma model evaluated on population
 predict_two_stage <- function(pop, m1, m2, label) {
   costs <- try(pop %>% mutate(costs = predict(m1, newdata = ., type = "response") * predict(m2, newdata = ., type = "response")))
-  if (inherits(costs, "try-error")) {
-    return(NA)
-  }
-  return(
-    costs %>%
-      group_by(study_group) %>%
-      reframe(value = mean(costs)) %>%
-      pivot_wider(names_from = study_group) %>%
-      mutate(difference = intervention - control, label)
-  )
+  if (inherits(costs, "try-error")) { return(NA) }
+  return(costs %>% group_by(study_group) %>% reframe(value = mean(costs))         %>% pivot_wider(names_from = study_group) %>% mutate(difference = intervention - control, label))
 }
 ```
 
@@ -154,13 +120,8 @@ study_pop <- expand.grid(study_group = c("control", "intervention"), age = seq(4
   mutate(ecosts = map_dbl(study_group, ~ rexp (1, 0.005 + 0.002 * (.x == "intervention"))) * exp(0.01 * age)) %>%
   mutate(costs  = events * ecosts)
 
-study_pop %>%
-  group_by(study_group) %>%
-  reframe(across(everything(), ~ mean(.x))) %>%
-  mutate(across(where(is.numeric), ~ round(.x, 2))) %>%
-  flextable() %>%
-  autofit() %>%
-  set_caption("Mean values")
+study_pop %>% group_by(study_group) %>% reframe(across(everything(), ~ mean(.x))) %>% mutate(across(where(is.numeric), ~ round(.x, 2))) %>%
+  flextable() %>% autofit() %>% set_caption("Mean values")
 ```
 
 Mean cost difference: `r study_pop %>% group_by(study_group) %>% reframe(mean = mean(costs)) %>% reframe(diff = round(mean[study_group == "intervention"] - mean[study_group == "control"], 2)) %>% pull("diff")`
@@ -172,11 +133,13 @@ Mean cost difference: `r study_pop %>% group_by(study_group) %>% reframe(mean = 
 ```{r example}
 # Gaussian identity link
 m_Gauss  <- lm(costs ~ study_group + age, data = study_pop)
+
 # Gamma log link after shift by 0.01 EUR
 m_Gamma  <- glmx(pcosts ~ study_group + age,
                  family = Gamma(link = "log"),
                  data = study_pop %>% mutate(pcosts = costs + 0.01))
-# two-stage model
+
+# two-stage model for events and costs per event
 m_Events <- glmx_events(events ~ study_group + age, data = study_pop)
 m_Ecosts <- glmx_pcosts(ecosts ~ study_group + age, data = study_pop %>% filter(events > 0))
 
@@ -184,9 +147,6 @@ m_Ecosts <- glmx_pcosts(ecosts ~ study_group + age, data = study_pop %>% filter(
 Gauss_id  <- predict_one_stage(study_pop, m_Gauss, "Single-stage: Gaussian (identity link)", 0.00)
 Gamma_log <- predict_one_stage(study_pop, m_Gamma, "Single-stage: Gamma (log link)", 0.01)
 ziGamma   <- predict_two_stage(study_pop, m_Events, m_Ecosts, "Two-stage: Counts * Gamma")
-rbind(Gauss_id, Gamma_log, ziGamma) %>%
-  mutate(across(where(is.numeric), ~ sprintf("%.02f", .x))) %>%
-  flextable() %>%
-  autofit() %>%
-  set_caption("Costs from regressions")
+rbind(Gauss_id, Gamma_log, ziGamma) %>% mutate(across(where(is.numeric), ~ sprintf("%.02f", .x))) %>%
+  flextable() %>% autofit() %>% set_caption("Costs from regressions")
 ```

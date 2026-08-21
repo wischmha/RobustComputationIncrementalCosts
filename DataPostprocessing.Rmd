@@ -1,8 +1,8 @@
 ---
 title:    "Patient-level simulation and model comparison for robust incremental cost estimation"
 subtitle: "Online Resource 4: Data Postprocessing"
-author:   "institute\n\nauthors"
-date:     "** **\n\nEdited: 2026-08-16, Executed: `r Sys.Date()`"
+author:   "Charité - Universitätsmedizin Berlin\n\nInstitute of Public Health\n\nHans-Aloys Wischmann, Toivo Glatz"
+date:     "** **\n\nEdited: 2026-08-17, Executed: `r Sys.Date()`"
 output:   word_document
 ---
 
@@ -57,7 +57,7 @@ output:   word_document
   plot_pdf_png("Figure_S1", 0.7, plot_width = 10,
     study_pops %>% filter(costs > 0) %>% mutate(events = factor(events)) %>%
     ggplot(aes(x = costs, group = events, fill = events)) +
-      geom_histogram(binwidth = 1000.0) + theme(panel.grid.minor.y = element_blank()) + scale_x_continuous(limits = c(0.0, 130000.0)) +
+      geom_histogram(binwidth = 1000.0) + theme(panel.grid.minor.y = element_blank()) + scale_x_continuous(labels = ~sprintf("%.0f", .x), limits = c(0.0, 130000.0)) +
       labs(x = "Non-Zero Costs [Euro]", y = "Absolute Frequency", fill = "# Events") + facet_wrap(~study_group))
 
   # check maximum cumulative length of stay, should not exceed follow-up period

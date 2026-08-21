@@ -1,8 +1,8 @@
 ---
 title:    "Patient-level simulation and model comparison for robust incremental cost estimation"
 subtitle: "Online Resource 2: Data Generation"
-author:   "institute\n\nauthors"
-date:     "** **\n\nEdited: 2026-08-16, Executed: `r Sys.Date()`"
+author:   "Charité - Universitätsmedizin Berlin\n\nInstitute of Public Health\n\nHans-Aloys Wischmann, Toivo Glatz"
+date:     "** **\n\nEdited: 2026-08-17, Executed: `r Sys.Date()`"
 output:   word_document
 ---
 

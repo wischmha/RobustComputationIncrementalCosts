@@ -1,8 +1,8 @@
 ---
 title:    "Patient-level simulation and model comparison for robust incremental cost estimation"
 subtitle: "Online Resource 3: Data Analysis"
-author:   "institute\n\nauthors"
-date:     "** **\n\nEdited: 2026-08-16, Executed: `r Sys.Date()`"
+author:   "Charité - Universitätsmedizin Berlin\n\nInstitute of Public Health\n\nHans-Aloys Wischmann, Toivo Glatz"
+date:     "** **\n\nEdited: 2026-08-17, Executed: `r Sys.Date()`"
 output:   word_document
 ---
 
@@ -20,7 +20,7 @@ output:   word_document
 
   # set chunk defaults, prepare to analyze simulations in parallel (no random numbers)
   knitr::opts_chunk$set(echo = FALSE, fig.width = 6.0, dpi = 600, comment = NA)
-  registerDoParallel(get_num_cores()); blas_set_num_threads(get_num_cores())
+  registerDoParallel(4); blas_set_num_threads(get_num_cores())
 ```
 
 ## Robust Regressions
