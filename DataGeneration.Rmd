@@ -2,22 +2,24 @@
 title:    "Patient-level simulation and model comparison for robust incremental cost estimation"
 subtitle: "Online Resource 2: Data Generation"
 author:   "Charité - Universitätsmedizin Berlin\n\nInstitute of Public Health\n\nHans-Aloys Wischmann, Toivo Glatz"
-date:     "** **\n\nEdited: 2026-08-17, Executed: `r Sys.Date()`"
+date:     "** **\n\nEdited: 2026-10-30, Executed: `r Sys.Date()`"
 output:   word_document
 ---
 
 ## Configuration: Parameters
 
 ```{r setup, include = FALSE}
-  # configurable parameters: scope
+  # configurable parameters: scope (and inflation of baseline hospitalizations)
   shifts <- c(0.01, 1.00)           # arbitrary, small positive amounts, in EUR
   n_obs  <- c(250, 500, 1000, 2000) # study population size (total across groups)
   n_sim  <- 10000                   # number of simulation runs, at least 1000
+  h_fact <- 1.0 # factor by which to exaggerate number of hospitalizations (must be 1.0, except for final sensitivity analysis)
 
   # https://service.destatis.de/bevoelkerungspyramide
   # https://www.gbe.rki.de/DE/Themen/GesundheitsfoerderungPraeventionUndVersorgung/Gesundheitsversorgung/StationaereVersorgung/InanspruchnahmeKrankenhaus/inanspruchnahmeKrankenhaus_node.html
   population_prop_age  <- c(age_45_64 = 0.28, age_65_79 = 0.16, age_80_99 = 0.07)  # proportion of population by age group (Germany, 2025)
   hospitalization_rate <- c(age_45_64 = 0.18, age_65_79 = 0.25, age_80_99 = 0.25)  # hospitalization rate by age group [1/year] (Germany, 2019)
+  hospitalization_rate <- h_fact * hospitalization_rate # exaggeration factor for final sensitivity analysis, to reduce proportion of zero-cost participants
 
   # https://de.statista.com/statistik/daten/studie/2604/umfrage/durchschnittliche-verweildauer-im-krankenhaus-seit-1992/
   # https://www.destatis.de/DE/Presse/Pressemitteilungen/2025/11/PD25_398_231.html
@@ -49,6 +51,9 @@ output:   word_document
 ## Scenarios: PICO
 
 ```{r study_population}
+  # flag final sensitivity analysis
+  if (h_fact != 1.0) { print(sprintf("Sensitivity analysis: h_fact = %.1f", h_fact)) }
+
   # target population (summary and parsimonous sample)
   target_pop <- expand_grid(study_group = c("control", "intervention"), age_index = 1:length(names(population_prop_age))) %>%
     mutate(age_group = names(population_prop_age)[age_index], prop  = population_prop_age[age_index]) %>%
@@ -105,7 +110,7 @@ For each of the n_sim = `r sprintf("%d", n_sim)` runs, one random study sample i
            ecosts  = costs / pmax(events, 1.0))      # non-negative costs per event
 
   # save study populations for all simulation runs
-  save(true_cost, target_pop_sample, n_sim, n_obs, study_pops, file = "./DataGeneration.Rdata", compress = "xz")
+  save(true_cost, shifts, target_pop_sample, n_sim, n_obs, study_pops, file = "./DataGeneration.Rdata", compress = "xz")
 
   # summarize simulated data across all simulation runs
   study_pops %>% select(-run, -pcosts1, -pcosts2) %>%
