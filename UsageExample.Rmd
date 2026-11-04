@@ -2,7 +2,7 @@
 title:    "Patient-level simulation and model comparison for robust incremental cost estimation"
 subtitle: "Online Resource 5: Usage Example"
 author:   "Charité - Universitätsmedizin Berlin\n\nInstitute of Public Health\n\nHans-Aloys Wischmann, Toivo Glatz"
-date:     "** **\n\nEdited: 2026-11-01, Executed: `r Sys.Date()`"
+date:     "** **\n\nEdited: 2026-11-04, Executed: `r Sys.Date()`"
 output:   word_document
 ---
 
@@ -113,13 +113,12 @@ Infrastructure and utility functions (skip ahead to example usage)
 
 ## Real-World Dataset
 
-Agency for Healthcare Research and Quality:
+**Agency for Healthcare Research and Quality**
 
-Medical Expenditure Panel Survey (MEPS)
-
-Variables: IPDIS (number of inpatient hospital discharges), IPFTCH (inpatient hospital charges), BORNUSA, AGELAST, SEX, and DATAYEAR
-
-No weighting is performed. BORNUSA is used as the contrast for the study_groups, with intervention (NO) vs. control (YES).
+- Medical Expenditure Panel Survey (MEPS) https://meps.ahrq.gov/mepsweb/
+- Variables: IPDIS (number of inpatient hospital discharges), IPFTCH (inpatient hospital charges), INSCOV (insurance status), POVCAT (income category), BORNUSA, AGELAST, SEX, and DATAYEAR
+- No weighting is performed
+- BORNUSA is used as the contrast for the study_groups, with intervention (2=NO) vs. control (1=YES)
 
 ```{r dataset}
   source_tags  <- c(243, 251, 256)
@@ -129,52 +128,58 @@ No weighting is performed. BORNUSA is used as the contrast for the study_groups,
   for (tag in source_tags) {
     download.file(sprintf(source_file, tag, tag), target_file, method = "auto")
     unzip(target_file, overwrite = TRUE, junkpaths = TRUE)
-    study_pop <- rbind(study_pop, read_xlsx(sprintf("./h%03d.xlsx", tag)) %>% select(N = matches("^IPDIS"), cost = matches("^IPFTCH"), BORNUSA, age = AGELAST, sex = SEX, year = DATAYEAR))
+    study_pop <- rbind(study_pop, read_xlsx(sprintf("./h%03d.xlsx", tag)) %>% select(N = matches("^IPDIS"), cost = matches("^IPFTCH"), INSURANCE = matches("^INSCOV"), INCOME = matches("^POVCAT"), BORNUSA, AGELAST, SEX, DATAYEAR))
   }
   ignore <- file.remove(target_file)
-  # reset number of (paid) hospitalizations to 0, if sum of hospitalization costs is zero, study group is determined by BORNUSA
-  study_pop <- study_pop %>% mutate(N = N * (cost > 0)) %>% filter(BORNUSA %in% 1:2) %>% mutate(study_group = ifelse(BORNUSA == 2, "intervention", "control"))
-  # report proportion of participants without any inpatient hospitalizations
+  # remove participants below age 18, reset number of (paid) hospitalizations to 0, if sum of hospitalization costs is zero, study group is determined by BORNUSA
+  study_pop <- study_pop %>% filter(BORNUSA %in% 1:2, AGELAST >= 18.0) %>% mutate(N = N * (cost > 0)) %>%
+    mutate(study_group = factor(BORNUSA,   levels = 1:2, labels = c("control", "intervention")), SEX = factor(SEX, levels = 1:2, labels = c("Male", "Female"))) %>%
+    mutate(INSURANCE   = factor(INSURANCE, levels = 1:3, labels = c("1: Private", "2: Public", "3: Uninsured"))) %>%
+    mutate(INCOME      = factor(INCOME,    levels = 1:5, labels = c("1: Poor", "2: Near poor", "3: Low", "4: Middle", "5: High")))
+  # report proportion of participants without any inpatient hospitalizations, by group
   study_pop %>% group_by(BORNUSA) %>% reframe(Number = n(), Proportion = sprintf("%.01f%%", 100.0 * sum(N == 0) / n()), Events = sprintf("%.03f", mean(N)), Cost = sprintf("%.02f USD", sum(cost)/sum(N))) %>%
-    flextable() %>% autofit() %>% set_caption("Number of participants, proportion w/o hospitalization, mean number of events per year, mean cost per event")
+    flextable() %>% autofit() %>% set_caption("Number of adult participants, proportion w/o hospitalization, mean number of events per year, mean cost per event")
 ```
 
 ## Example Usage
 
 **Note:** Warnings are expected as we anticipate some models to fail
 
-Regression models are adjusted for age, sex, and the calendar year.
+Regression models are adjusted for sex, age in years, calendar year (inflation), income category, and insurance status
 
-Skip ahead to Results section...
-
-```{r example}
+```{r example, warning = FALSE}
+  # shift costs to positive values (study_pop_p) or filter on positive number of events (study_pop_f)
   study_pop_p <- study_pop %>% mutate(cost = cost + 0.01)
   study_pop_f <- study_pop %>% filter(N > 0) %>% mutate(cost = cost / N)
 
   # compute different regression models
-  m_Gauss     <-   lm(       cost ~ study_group + age + sex + year, data = study_pop)                                      # Gaussian identity link
-  m_Gamma_id  <- glmx(       cost ~ study_group + age + sex + year, data = study_pop_p, family = Gamma(link = "identity")) # Gamma identity link after shift by 0.01 USD
-  m_Gamma_log <- glmx(       cost ~ study_group + age + sex + year, data = study_pop_p, family = Gamma(link = "log"))      # Gamma log link after shift by 0.01 USD
-  m_Events    <- glmx_events(N    ~ study_group + age + sex + year, data = study_pop)                                      # first stage: number of events
-  m_Ecosts    <- glmx_pcosts(cost ~ study_group + age + sex + year, data = study_pop_f)                                    # second stage: cost per event, only if event
+  m_Gauss     <-   lm(       cost ~ study_group + SEX + AGELAST + DATAYEAR + INCOME + INSURANCE, data = study_pop)                                 # Gaussian identity link
+  m_Gamma_log <- glmx(       cost ~ study_group + SEX + AGELAST + DATAYEAR + INCOME + INSURANCE, data = study_pop_p, family = Gamma(link = "log")) # Gamma log link after shift by 0.01 USD
+  m_Events    <- glmx_events(N    ~ study_group + SEX + AGELAST + DATAYEAR + INCOME + INSURANCE, data = study_pop)                                 # first stage: number of events
+  m_Ecosts    <- glmx_pcosts(cost ~ study_group + SEX + AGELAST + DATAYEAR + INCOME + INSURANCE, data = study_pop_f)                               # second stage: cost per event, only if event
 
   # check convergence (array for glm* implementations from different packages)
-  m_Gamma_id$converged
-  m_Gamma_log$converged
+  print("Convergence")
+  print(paste("Gamma(log):",       paste(m_Gamma_log$converged, collapse = ", ")))
+  print(paste("Number of Events:", paste(m_Events$converged,    collapse = ", ")))
+  print(paste("Costs per event:",  paste(m_Ecosts$converged,    collapse = ", ")))
 ```
 
 ## Results
 
-```{r results}
+```{r results, warning = FALSE}
+  # utility function to report marginal risk differences (RD) from comparisons
+  marginal_RD <- function(m1, digits = 2) {
+    return(as.data.frame(comparisons(m1, comparison = "difference", by = TRUE, type = "response")) %>% mutate(estimate = sprintf("%.0*f [%.0*f; %.0*f]", digits, estimate, digits, conf.low, digits, conf.high)) %>% select(term, contrast, estimate))
+  }
+
   # compute marginal cost difference for all regression models
   Gauss_id  <- marginal_one_stage(study_pop, m_Gauss,     "Single-stage: Gaussian (identity link)")
-  Gamma_id  <- marginal_one_stage(study_pop, m_Gamma_id,  "Single-stage: Gamma (identity link)")
   Gamma_log <- marginal_one_stage(study_pop, m_Gamma_log, "Single-stage: Gamma (log link)")
   Two_Stage <- marginal_two_stage(study_pop, m_Events, m_Ecosts, "Two-stage: Poisson * Gamma")
-  rbind(Gauss_id, Gamma_id, Gamma_log, Two_Stage) %>% mutate(across(where(is.numeric), ~ sprintf("%.02f", .x))) %>% flextable() %>% autofit() %>% set_caption("Marginal cost difference [USD]")
-
-  # compare to evaluation of comparisons using marginaleffects package
-  as.data.frame(comparisons(m_Gauss,     vcov = FALSE, comparison = "difference", by = TRUE, type = "response")) %>% select(term, contrast, estimate) %>% flextable() %>% autofit() %>% set_caption("Gauss")
-  as.data.frame(comparisons(m_Gamma_id,  vcov = FALSE, comparison = "difference", by = TRUE, type = "response")) %>% select(term, contrast, estimate) %>% flextable() %>% autofit() %>% set_caption("Gamma(identity)")
-  as.data.frame(comparisons(m_Gamma_log, vcov = FALSE, comparison = "difference", by = TRUE, type = "response")) %>% select(term, contrast, estimate) %>% flextable() %>% autofit() %>% set_caption("Gamma(log)")
+  rbind(Gauss_id, Gamma_log, Two_Stage) %>% mutate(across(where(is.numeric), ~ sprintf("%.02f", .x))) %>% flextable() %>% autofit() %>% set_caption("Marginal differences in cost [USD], Intervention - Control")
+  marginal_RD(m_Events, 3) %>% flextable() %>% autofit() %>% set_caption("Marginal differences in number of events per annum")
+  marginal_RD(m_Ecosts)    %>% flextable() %>% autofit() %>% set_caption("Marginal differences in cost per event [USD]")
+  marginal_RD(m_Gauss)     %>% flextable() %>% autofit() %>% set_caption("Marginal differences in cost [USD]: Gauss")
+  marginal_RD(m_Gamma_log) %>% flextable() %>% autofit() %>% set_caption("Marginal differences in cost [USD]: Gamma(log)")
 ```
