@@ -142,7 +142,9 @@ Infrastructure and utility functions (skip ahead to example usage)
     study_pop <- foreach (tag = source_tags, .combine = rbind, .packages = "readxl") %do% {
       read_xlsx(sprintf("./h%03d.xlsx", tag)) %>% select(N = matches("^IPDIS"), cost = matches("^IPFTCH"), INSURANCE = matches("^INSCOV"), INCOME = matches("^POVCAT"), AGELAST, SEX, DATAYEAR, BORNUSA)
     }
-    study_pop <- study_pop %>% mutate(across(everything(), as.numeric)) %>%
+    study_pop <- study_pop %>% mutate(across(everything(), as.numeric)) %>% mutate(across(everything(), ~ifelse(.x < 0, NA, .x)))
+    print(sprintf("MEPS - Years: %s, Rows: Total = %d, Complete = %d", paste(unique(study_pop$DATAYEAR), collapse = ", "), nrow(study_pop), nrow(study_pop %>% filter(complete.cases(.)))))
+    study_pop <- study_pop %>%
       filter(AGELAST >= 18, SEX > 0, INSURANCE > 0, INCOME > 0, BORNUSA > 0, (N == 0 & cost == 0) | (N > 0 & cost > 0)) %>%
       mutate(SEX       = factor(SEX,       levels = 1:2, labels = c("Male", "Female"))) %>%
       mutate(INSURANCE = factor(INSURANCE, levels = 1:3, labels = c("1: Private", "2: Public", "3: Uninsured"))) %>%
@@ -151,6 +153,7 @@ Infrastructure and utility functions (skip ahead to example usage)
       mutate(study_group = ifelse(BORNUSA == 1, "control", "intervention"))
     save(study_pop, file = target_file, compress = "xz")
   }
+  study_pop %>% group_by(study_group) %>% reframe(n = n(), prop_zero = round(100.0 * sum(cost == 0.0) / n, 2), mean_cost = sum(cost) / sum(N)) %>% flextable() %>% autofit()
 ```
 
 ## Example Usage
