@@ -244,7 +244,7 @@ We used a "placebo design" with real data: persons were randomly allocated two g
                                            RMSE = rmsq_ci(    costdiff)) %>%
     pivot_longer(-c(N, Model), names_to = "Metric") %>% pivot_wider(names_from = Model, values_from = value) %>%
     mutate(Type = ifelse(N != nrow(study_pop), "RCT", "Registry")) %>% select(Type, N, Metric, everything()) %>%
-    flextable() %>% set_caption(sprintf("Placebo study (MEPS 2022-2024): Metrics in USD [99%-CI], N_SIM=%d", N_sim)) %>% autofit() %>% hline(3)
+    flextable() %>% set_caption(sprintf("Placebo study (MEPS 2022-2024): Metrics in USD [99%%-CI], N_SIM=%d", N_sim)) %>% autofit() %>% hline(3)
 ```
 
 ## Figure
