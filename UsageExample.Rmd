@@ -2,7 +2,7 @@
 title:    "Patient-level simulation and model comparison for robust incremental cost estimation"
 subtitle: "Online Resource 5: Usage Example"
 author:   "Charité - Universitätsmedizin Berlin\n\nInstitute of Public Health\n\nHans-Aloys Wischmann, Toivo Glatz"
-date:     "** **\n\nEdited: 2026-11-04, Executed: `r Sys.Date()`"
+date:     "** **\n\nEdited: 2026-11-11, Executed: `r Sys.Date()`"
 output:   word_document
 ---
 
@@ -19,17 +19,21 @@ This R markdown script demonstrates the practical use of our proposed helper fun
 ## Setup and Libraries
 
 ```{r setup, include = FALSE}
-# required libraries
-library(tidyverse)
-library(flextable)
-library(readxl)
-library(mgcv)
-library(glm2)
-library(glmmTMB)
-library(marginaleffects)
-
-# set chunk defaults
-knitr::opts_chunk$set(echo = FALSE, fig.width = 6.0, dpi = 600, comment = NA)
+  # required libraries
+  library(tidyverse)
+  library(flextable)
+  library(readxl)
+  library(mgcv)
+  library(glm2)
+  library(glmmTMB)
+  library(foreach)
+  library(doParallel)
+  library(RhpcBLASctl)
+  library(marginaleffects)
+  
+  # set chunk defaults
+  knitr::opts_chunk$set(echo = FALSE, fig.width = 6.0, dpi = 600, comment = NA)
+  registerDoParallel(get_num_cores()); blas_set_num_threads(min(6, get_num_cores()))
 ```
 
 ## Robust Regressions
@@ -98,15 +102,17 @@ Infrastructure and utility functions (skip ahead to example usage)
 
   # utility function to extract marginal cost difference for single stage model evaluated on target population (can be the study population)
   marginal_one_stage <- function(pop, m1, model) {
-    costdiff <- mean(predict(m1, newdata = pop %>% mutate(study_group = "intervention"), type = "response")) -
-                mean(predict(m1, newdata = pop %>% mutate(study_group = "control"),      type = "response"))
+    costdiff <- NA
+    try(costdiff <- mean(predict(m1, newdata = pop %>% mutate(study_group = "intervention"), type = "response")) -
+                    mean(predict(m1, newdata = pop %>% mutate(study_group = "control"),      type = "response")))
     return(data.frame(costdiff, model))
   }
 
   # utility function to extract marginal cost difference for Gaussian/Poisson-Gamma model evaluated on target population (can be the study population)
   marginal_two_stage <- function(pop, m1, m2, model) {
-    costdiff <- mean(predict(m1, newdata = pop %>% mutate(study_group = "intervention"), type = "response") * predict(m2, newdata = pop %>% mutate(study_group = "intervention"), type = "response")) -
-                mean(predict(m1, newdata = pop %>% mutate(study_group = "control"),      type = "response") * predict(m2, newdata = pop %>% mutate(study_group = "control"),      type = "response"))
+    costdiff <- NA
+    try(costdiff <- mean(predict(m1, newdata = pop %>% mutate(study_group = "intervention"), type = "response") * predict(m2, newdata = pop %>% mutate(study_group = "intervention"), type = "response")) -
+                    mean(predict(m1, newdata = pop %>% mutate(study_group = "control"),      type = "response") * predict(m2, newdata = pop %>% mutate(study_group = "control"),      type = "response")))
     return(data.frame(costdiff, model))
   }
 ```
@@ -118,27 +124,33 @@ Infrastructure and utility functions (skip ahead to example usage)
 - Medical Expenditure Panel Survey (MEPS) https://meps.ahrq.gov/mepsweb/
 - Variables: IPDIS (number of inpatient hospital discharges), IPFTCH (inpatient hospital charges), INSCOV (insurance status), POVCAT (income category), BORNUSA, AGELAST, SEX, and DATAYEAR
 - No weighting is performed
-- BORNUSA is used as the contrast for the study_groups, with intervention (2=NO) vs. control (1=YES)
+- MEPS codes missing values as negative numbers, and any such records are excluded (>0)
+- Only records with (0 costs and 0 stays) or with (positive stays and positive costs) are included
+- Costs are shifted by +0.01 USD for Gaussian(log) and Gamma regressions (pcost)
+- Costs per event (ecost) are defined as the cost per inpatient discharge (cost / N), and they are used as the outcome of the second stage of the two-stage model
 
 ```{r dataset}
-  source_tags  <- c(243, 251, 256)
+  source_tags <- c(243, 251, 256)
   source_file <- "https://meps.ahrq.gov/mepsweb/data_files/pufs/h%03d/h%03dxlsx.zip"
-  target_file <- "./MEPS.zip"
-  study_pop <- data.frame()
-  for (tag in source_tags) {
-    download.file(sprintf(source_file, tag, tag), target_file, method = "auto")
-    unzip(target_file, overwrite = TRUE, junkpaths = TRUE)
-    study_pop <- rbind(study_pop, read_xlsx(sprintf("./h%03d.xlsx", tag)) %>% select(N = matches("^IPDIS"), cost = matches("^IPFTCH"), INSURANCE = matches("^INSCOV"), INCOME = matches("^POVCAT"), BORNUSA, AGELAST, SEX, DATAYEAR))
+  target_file <- "./MEPS.Rdata"
+  if (file.exists(target_file)) {
+    load(target_file)
+  } else {
+    foreach (tag = source_tags, .combine = rbind, .packages = "readxl") %dopar% {
+      temp_file <- tempfile(); download.file(sprintf(source_file, tag, tag), temp_file, method = "auto"); unzip(temp_file, overwrite = TRUE, junkpaths = TRUE); unlink(temp_file)
+    }
+    study_pop <- foreach (tag = source_tags, .combine = rbind, .packages = "readxl") %do% {
+      read_xlsx(sprintf("./h%03d.xlsx", tag)) %>% select(N = matches("^IPDIS"), cost = matches("^IPFTCH"), INSURANCE = matches("^INSCOV"), INCOME = matches("^POVCAT"), AGELAST, SEX, DATAYEAR, BORNUSA)
+    }
+    study_pop <- study_pop %>% mutate(across(everything(), as.numeric)) %>%
+      filter(AGELAST >= 18, SEX > 0, INSURANCE > 0, INCOME > 0, BORNUSA > 0, (N == 0 & cost == 0) | (N > 0 & cost > 0)) %>%
+      mutate(SEX       = factor(SEX,       levels = 1:2, labels = c("Male", "Female"))) %>%
+      mutate(INSURANCE = factor(INSURANCE, levels = 1:3, labels = c("1: Private", "2: Public", "3: Uninsured"))) %>%
+      mutate(INCOME    = factor(INCOME,    levels = 1:5, labels = c("1: Poor", "2: Near poor", "3: Low", "4: Middle", "5: High"))) %>%
+      mutate(pcost     = cost + 0.01, ecost = cost / pmax(N, 1)) %>%
+      mutate(study_group = ifelse(BORNUSA == 1, "control", "intervention"))
+    save(study_pop, file = target_file, compress = "xz")
   }
-  ignore <- file.remove(target_file)
-  # remove participants below age 18, reset number of (paid) hospitalizations to 0, if sum of hospitalization costs is zero, study group is determined by BORNUSA
-  study_pop <- study_pop %>% filter(BORNUSA %in% 1:2, AGELAST >= 18.0) %>% mutate(N = N * (cost > 0)) %>%
-    mutate(study_group = factor(BORNUSA,   levels = 1:2, labels = c("control", "intervention")), SEX = factor(SEX, levels = 1:2, labels = c("Male", "Female"))) %>%
-    mutate(INSURANCE   = factor(INSURANCE, levels = 1:3, labels = c("1: Private", "2: Public", "3: Uninsured"))) %>%
-    mutate(INCOME      = factor(INCOME,    levels = 1:5, labels = c("1: Poor", "2: Near poor", "3: Low", "4: Middle", "5: High")))
-  # report proportion of participants without any inpatient hospitalizations, by group
-  study_pop %>% group_by(BORNUSA) %>% reframe(Number = n(), Proportion = sprintf("%.01f%%", 100.0 * sum(N == 0) / n()), Events = sprintf("%.03f", mean(N)), Cost = sprintf("%.02f USD", sum(cost)/sum(N))) %>%
-    flextable() %>% autofit() %>% set_caption("Number of adult participants, proportion w/o hospitalization, mean number of events per year, mean cost per event")
 ```
 
 ## Example Usage

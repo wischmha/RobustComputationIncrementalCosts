@@ -2,7 +2,7 @@
 title:    "Patient-level simulation and model comparison for robust incremental cost estimation"
 subtitle: "Online Resource 3: Data Analysis"
 author:   "Charité - Universitätsmedizin Berlin\n\nInstitute of Public Health\n\nHans-Aloys Wischmann, Toivo Glatz"
-date:     "** **\n\nEdited: 2026-11-01, Executed: `r Sys.Date()`"
+date:     "** **\n\nEdited: 2026-11-11, Executed: `r Sys.Date()`"
 output:   word_document
 ---
 
@@ -14,9 +14,9 @@ output:   word_document
   library(mgcv)
   library(glm2)
   library(glmmTMB)
-  library(RhpcBLASctl)
   library(foreach)
   library(doParallel)
+  library(RhpcBLASctl)
 
   # set chunk defaults, prepare to analyze simulations in parallel (no random numbers)
   knitr::opts_chunk$set(echo = FALSE, fig.width = 6.0, dpi = 600, comment = NA)
@@ -89,15 +89,17 @@ To benefit from its more robust step-halving approach and thus improved converge
 
   # utility function to extract marginal cost difference for single stage model evaluated on target population (can be the study population)
   marginal_one_stage <- function(pop, m1, model) {
-    costdiff <- mean(predict(m1, newdata = pop %>% mutate(study_group = "intervention"), type = "response")) -
-                mean(predict(m1, newdata = pop %>% mutate(study_group = "control"),      type = "response"))
+    costdiff <- NA
+    try(costdiff <- mean(predict(m1, newdata = pop %>% mutate(study_group = "intervention"), type = "response")) -
+                    mean(predict(m1, newdata = pop %>% mutate(study_group = "control"),      type = "response")))
     return(data.frame(costdiff, model))
   }
 
   # utility function to extract marginal cost difference for Gaussian/Poisson-Gamma model evaluated on target population (can be the study population)
   marginal_two_stage <- function(pop, m1, m2, model) {
-    costdiff <- mean(predict(m1, newdata = pop %>% mutate(study_group = "intervention"), type = "response") * predict(m2, newdata = pop %>% mutate(study_group = "intervention"), type = "response")) -
-                mean(predict(m1, newdata = pop %>% mutate(study_group = "control"),      type = "response") * predict(m2, newdata = pop %>% mutate(study_group = "control"),      type = "response"))
+    costdiff <- NA
+    try(costdiff <- mean(predict(m1, newdata = pop %>% mutate(study_group = "intervention"), type = "response") * predict(m2, newdata = pop %>% mutate(study_group = "intervention"), type = "response")) -
+                    mean(predict(m1, newdata = pop %>% mutate(study_group = "control"),      type = "response") * predict(m2, newdata = pop %>% mutate(study_group = "control"),      type = "response")))
     return(data.frame(costdiff, model))
   }
 ```

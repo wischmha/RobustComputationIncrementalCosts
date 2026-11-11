@@ -1,0 +1,234 @@
+---
+title:    "Patient-level simulation and model comparison for robust incremental cost estimation"
+subtitle: "Online Resource 5: Usage Example"
+author:   "Charité - Universitätsmedizin Berlin\n\nInstitute of Public Health\n\nHans-Aloys Wischmann, Toivo Glatz"
+date:     "** **\n\nEdited: 2026-11-11, Executed: `r Sys.Date()`"
+output:   word_document
+---
+
+This R markdown script demonstrates the practical use of our proposed helper functions to estimate incremental costs between two groups in a realistic dataset.
+
+- **`glmx_start()`** estimates starting values to overcomes errors (glm, glm2) or suboptimal fits (glmmTMB).
+- **`get_best_model()`** returns the model with the lowest RSS (sum of squared response residuals) from all valid models (non-NULL, converged, and valid RSS).
+- **`glmx()`** fits multiple regression models using four different packages (`stats::glm(), glm2::glm2(), mgcv::gam(), glmmTMB::glmmTMB()`) and returns the best fitting model.
+- **`glmx_events()`** fits multiple regression models for the first stage of a two stage model (number of events with non-zero costs) using Gaussian with identity-link and Poisson with identity and log-link, and returns the best fitting model.
+- **`glmx_pcosts()`** fits multiple regression models for the second stage of a two stage model (positive costs) using Gamma with identity and log-link, and returns the best fitting model.
+- **`marginal_one_stage()`** predicts marginal cost difference between groups for a single stage model based on a population sample (here, the study sample).
+- **`marginal_two_stage()`** predicts marginal cost difference between groups for a two stage model based on a population sample (here, the study sample).
+
+## Setup and Libraries
+
+```{r setup, include = FALSE}
+  N_sim <- 1000 # should be at least 100, so that Q1/Q3 are meaningful
+
+  # required libraries
+  library(tidyverse)
+  library(flextable)
+  library(readxl)
+  library(mgcv)
+  library(glm2)
+  library(glmmTMB)
+  library(foreach)
+  library(doParallel)
+  library(RhpcBLASctl)
+  library(marginaleffects)
+  library(doRNG)
+
+  # set chunk defaults, prepare to analyze simulations in parallel (no random numbers)
+  knitr::opts_chunk$set(echo = FALSE, fig.width = 6.0, dpi = 600, comment = NA)
+  registerDoParallel(get_num_cores()); blas_set_num_threads(min(6, get_num_cores()))
+
+  # utility function to plot in high resolution to *.png and *.pdf file and inline
+  plot_pdf_png <- function(file_name, aspect_ratio, plot_object, plot_width = 6.0, plot_res = 600) {
+    themed_object <- plot_object + theme(text = element_text(size = 10), plot.title = element_text(size = 10))
+    png(sprintf("%s.png", file_name), width = plot_width, height = plot_width * aspect_ratio, units = "in", res = plot_res); print(themed_object); ignore <- dev.off()
+    pdf(sprintf("%s.pdf", file_name), width = plot_width, height = plot_width * aspect_ratio, paper = "a4");                 print(themed_object); ignore <- dev.off()
+    knitr::include_graphics(sprintf("%s.png", file_name))
+  }
+```
+
+## Robust Regressions
+
+Infrastructure and utility functions (skip ahead to example usage)
+
+```{r robust_regressions}
+  # overcomes glm/glm2 (log-link) error "no valid set of coefficients has been found: please supply starting values"
+  glmx_start <- function(formula, data, family) {
+    m <- lm(formula, data)
+    c <- coef(m)
+    if (family$link == "identity") {
+      c[names(c) == "(Intercept)"] <- mean(predict(m))
+      c[names(c) != "(Intercept)"] <- 0.0
+    } else if (family$link == "log") {
+      c[names(c) == "(Intercept)"] <- log(mean(predict(m)))
+      c[names(c) != "(Intercept)"] <- 0.0
+    } else {
+      c[] <- 1.0
+    }
+    return(c)
+  }
+
+  # utility function to select best regression fit, instrumented to track performance
+  get_best_model <- function(m_list) {
+    returned  <- map_lgl(m_list,  ~       !is.null(.x))
+    converged <- map_lgl(m_list,  ~ifelse(!is.null(.x), class(.x)[1] == "lm" || (class(.x)[1] %in% c("glm", "gam") && .x$converged[1]) || (class(.x)[1] == "glmmTMB" && .x$fit$convergence == 0), FALSE))
+    RSSs      <- map_dbl(m_list,  ~ifelse(!is.null(.x), sum(resid(.x, type = "response")^2), NA))
+    valid_RSS <- !is.na(RSSs)
+    if (sum(valid_RSS) == 0) { return(NULL) }
+    best_RSS <- which.min(RSSs)
+    m_list[[best_RSS]]$returned  <- returned
+    m_list[[best_RSS]]$converged <- converged
+    m_list[[best_RSS]]$valid_RSS <- valid_RSS
+    m_list[[best_RSS]]$best_RSS  <- ifelse(!is.na(RSSs), RSSs == min(RSSs, na.rm = TRUE), FALSE)
+    return(m_list[[best_RSS]])
+  }
+
+  # wrapper function around glm, glm2::glm2, mgcv::gam, and glmmTMB::glmmTMB, selecting the best among multiple fits
+  glmx <- function(formula, data, family) {
+    s <- glmx_start(formula, data, family)
+    models <- list(NULL, NULL, NULL, NULL)
+    try (models[[1]] <-     glm(formula, family, data, start = s))
+    try (models[[2]] <-    glm2(formula, family, data, start = s))
+    try (models[[3]] <-     gam(formula, family, data))
+    try (models[[4]] <- glmmTMB(formula, data, family, start = list(beta = s), na.action = na.exclude))
+    return(get_best_model(models))
+  }
+
+  # wrapper to select the best fit among gaussian and poisson, the latter with identity link or log-link, for counts
+  glmx_events <- function(formula, data) {
+    models <- list(NULL, NULL, NULL)
+    try(models[[1]] <-   lm(formula, data))
+    try(models[[2]] <- glmx(formula, data, family = poisson(link = "identity")))
+    try(models[[3]] <- glmx(formula, data, family = poisson(link = "log")))
+    return(get_best_model(models))
+  }
+
+  # wrapper to select the best fit among gamma regressions with identity link or log-link, for positive costs
+  glmx_pcosts <- function(formula, data) {
+    models <- list(NULL, NULL)
+    try(models[[1]] <- glmx(formula, data, family = Gamma(link = "identity")))
+    try(models[[2]] <- glmx(formula, data, family = Gamma(link = "log")))
+    return(get_best_model(models))
+  }
+
+  # utility function to extract marginal cost difference for single stage model evaluated on target population (can be the study population)
+  marginal_one_stage <- function(pop, m1, model) {
+    costdiff <- NA
+    try(costdiff <- mean(predict(m1, newdata = pop %>% mutate(study_group = "intervention"), type = "response")) -
+                    mean(predict(m1, newdata = pop %>% mutate(study_group = "control"),      type = "response")))
+    return(data.frame(costdiff, model))
+  }
+
+  # utility function to extract marginal cost difference for Gaussian/Poisson-Gamma model evaluated on target population (can be the study population)
+  marginal_two_stage <- function(pop, m1, m2, model) {
+    costdiff <- NA
+    try(costdiff <- mean(predict(m1, newdata = pop %>% mutate(study_group = "intervention"), type = "response") * predict(m2, newdata = pop %>% mutate(study_group = "intervention"), type = "response")) -
+                    mean(predict(m1, newdata = pop %>% mutate(study_group = "control"),      type = "response") * predict(m2, newdata = pop %>% mutate(study_group = "control"),      type = "response")))
+    return(data.frame(costdiff, model))
+  }
+```
+
+## Real-World Dataset
+
+**Agency for Healthcare Research and Quality**
+
+- Medical Expenditure Panel Survey (MEPS) https://meps.ahrq.gov/mepsweb/
+- Variables: IPDIS (number of inpatient hospital discharges), IPFTCH (inpatient hospital charges), INSCOV (insurance status), POVCAT (income category), BORNUSA, AGELAST, SEX, and DATAYEAR
+- No weighting is performed
+- MEPS codes missing values as negative numbers, and any such records are excluded (>0)
+- Only records with (0 costs and 0 stays) or with (positive stays and positive costs) are included
+- Costs are shifted by +0.01 USD for Gaussian(log) and Gamma regressions (pcost)
+- Costs per event (ecost) are defined as the cost per inpatient discharge (cost / N), and they are used as the outcome of the second stage of the two-stage model
+
+```{r dataset}
+  source_tags <- c(243, 251, 256)
+  source_file <- "https://meps.ahrq.gov/mepsweb/data_files/pufs/h%03d/h%03dxlsx.zip"
+  target_file <- "./MEPS.Rdata"
+  if (file.exists(target_file)) {
+    load(target_file)
+  } else {
+    foreach (tag = source_tags, .combine = rbind, .packages = "readxl") %dopar% {
+      temp_file <- tempfile(); download.file(sprintf(source_file, tag, tag), temp_file, method = "auto"); unzip(temp_file, overwrite = TRUE, junkpaths = TRUE); unlink(temp_file)
+    }
+    study_pop <- foreach (tag = source_tags, .combine = rbind, .packages = "readxl") %do% {
+      read_xlsx(sprintf("./h%03d.xlsx", tag)) %>% select(N = matches("^IPDIS"), cost = matches("^IPFTCH"), INSURANCE = matches("^INSCOV"), INCOME = matches("^POVCAT"), AGELAST, SEX, DATAYEAR, BORNUSA)
+    }
+    study_pop <- study_pop %>% mutate(across(everything(), as.numeric)) %>%
+      filter(AGELAST >= 18, SEX > 0, INSURANCE > 0, INCOME > 0, BORNUSA > 0, (N == 0 & cost == 0) | (N > 0 & cost > 0)) %>%
+      mutate(SEX       = factor(SEX,       levels = 1:2, labels = c("Male", "Female"))) %>%
+      mutate(INSURANCE = factor(INSURANCE, levels = 1:3, labels = c("1: Private", "2: Public", "3: Uninsured"))) %>%
+      mutate(INCOME    = factor(INCOME,    levels = 1:5, labels = c("1: Poor", "2: Near poor", "3: Low", "4: Middle", "5: High"))) %>%
+      mutate(pcost     = cost + 0.01, ecost = cost / pmax(N, 1)) %>%
+      mutate(study_group = ifelse(BORNUSA == 1, "control", "intervention"))
+    save(study_pop, file = target_file, compress = "xz")
+  }
+```
+
+## Placebo Study
+
+We used a "placebo design" with real data: persons were randomly allocated two groups (intervention and control), so that the true cost difference is zero by construction. This follows the logic of placebo analyses (Bertrand et al., 2004; Eggers et al., 2024) and of randomization methods based on repeated random assignment. All regressions are adjusted for age, sex, and calendar year.
+
+```{r placebo, warning = FALSE}
+  # regression model, adjusting for age, sex, and calendar year
+  formula1 <- outcome ~ study_group + AGELAST + SEX + DATAYEAR
+
+  # placebo allocation, parallel (needs %dorng%, must not use %dopar%)
+  set.seed(345)
+  pop_list <- foreach (i = 1:N_sim, .packages = "tidyverse") %dorng% {
+    list(study_pop %>% slice_sample(n = 2000, replace = FALSE) %>% mutate(study_group = ifelse(runif(nrow(.)) > 0.5, "control", "intervention")),
+         study_pop %>%                                             mutate(study_group = ifelse(runif(nrow(.)) > 0.5, "control", "intervention")))
+  }
+  pop_list <- list_flatten(pop_list)
+
+  # regressions fits, parallel
+  results <- foreach (i = 1:length(pop_list), .combine = rbind, .packages = c("tidyverse", "glm2", "mgcv", "glmmTMB")) %dopar% {
+    group_pop <- pop_list[[i]]
+
+    # one-stage models: Gaussian (identity), Gaussian (log), Gamma (identity), and Gamma (log)
+    m_gauss_id  <-   lm(formula1, data = group_pop %>% rename(outcome =  cost))
+    m_gauss_log <- glmx(formula1, data = group_pop %>% rename(outcome = pcost), family = gaussian(link = "log"))
+    m_gamma_id  <- glmx(formula1, data = group_pop %>% rename(outcome = pcost), family = Gamma(link = "identity"))
+    m_gamma_log <- glmx(formula1, data = group_pop %>% rename(outcome = pcost), family = Gamma(link = "log"))
+
+    # two-stage model: number of discharges times costs per discharge
+    m_events <- glmx_events(formula1, data = group_pop %>% rename(outcome = N))
+    m_pcosts <- glmx_pcosts(formula1, data = group_pop %>% rename(outcome = ecost) %>% filter(N > 0))
+
+    # marginal cost differences, evaluated on the study sample
+    rbind(marginal_one_stage(group_pop, m_gauss_id,         "Gaussian (identity)"),
+          marginal_one_stage(group_pop, m_gauss_log,        "Gaussian (log)"),
+          marginal_one_stage(group_pop, m_gamma_id,         "Gamma (identity)"),
+          marginal_one_stage(group_pop, m_gamma_log,        "Gamma (log)"),
+          marginal_two_stage(group_pop, m_events, m_pcosts, "Two-Stage Poisson-Gamma")) %>% mutate(N = nrow(group_pop))
+  }
+```
+
+## Results
+
+```{r results}
+  results %>% mutate(model = fct_inorder(model)) %>%
+    group_by(N, Model = model) %>% reframe(Bias     = mean(costdiff,           na.rm = TRUE),
+                                           MAE      = mean(abs(costdiff),      na.rm = TRUE),
+                                           RMSE     = sqrt(mean(costdiff^2,    na.rm = TRUE)),
+                                           IQR      = quantile(costdiff, 0.75, na.rm = TRUE) - quantile(costdiff, 0.25, na.rm = TRUE),
+                                           N_SIM_OK = sum(!is.na(costdiff))) %>%
+    mutate(across(-c(Model, N_SIM_OK, N), ~round(.x, 2))) %>%
+    flextable() %>% set_caption(sprintf("Placebo study (MEPS 2022-2024): Metrics in USD, N_SIM=%d", N_sim)) %>% autofit() %>% hline(c(5, 10))
+```
+
+## Figure
+
+```{r figure}
+  plot_pdf_png("Figure_S6", aspect_ratio = 0.5,
+    results %>% filter(!is.na(costdiff)) %>% mutate(model = fct_rev(fct_inorder(model)), N = sprintf("N=%d", N)) %>%
+    ggplot(aes(x = costdiff, y = model, fill = model)) +
+      geom_vline(xintercept = 0, linetype = "dashed", color = "grey40") +
+      geom_violin(alpha = 0.5, color = NA, scale = "width") +
+      geom_boxplot(width = 0.15, outlier.shape = NA, fill = "white", color = "grey20") +
+      stat_summary(fun = mean, geom = "point", orientation = "y", shape = 23, size = 2.5, fill = "black") +
+      scale_fill_brewer(palette = "Set2") +
+      labs(x = "Estimated cost difference [USD] (true value = 0.00 USD)", y = NULL, title = "Placebo study (MEPS 2022-2024)",
+           subtitle = sprintf("%d random allocations; diamond = mean (bias), box = median and IQR", N_sim)) +
+      theme_minimal(base_size = 11) +
+      theme(legend.position = "none", panel.grid.minor = element_blank(), plot.title = element_text(face = "bold")) + facet_wrap(~N, nrow = 1))
+```
