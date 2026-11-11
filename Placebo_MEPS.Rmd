@@ -1,7 +1,7 @@
 ---
 title:    "Patient-level simulation and model comparison for robust incremental cost estimation"
-subtitle: "Online Resource 5: Usage Example"
-author:   "Charité - Universitätsmedizin Berlin\n\nInstitute of Public Health\n\nHans-Aloys Wischmann, Toivo Glatz"
+subtitle: "Online Resource 5: Placebo study using MEPS data"
+author:   "Charité - Universitätsmedizin Berlin\n\nInstitute of Public Health\n\nPaula Filser, Hans-Aloys Wischmann, Toivo Glatz"
 date:     "** **\n\nEdited: 2026-11-11, Executed: `r Sys.Date()`"
 output:   word_document
 ---
@@ -19,7 +19,7 @@ This R markdown script demonstrates the practical use of our proposed helper fun
 ## Setup and Libraries
 
 ```{r setup, include = FALSE}
-  N_sim <- 1000 # should be at least 100, so that Q1/Q3 are meaningful
+  N_sim <- 1000 # should be at least 1000
 
   # required libraries
   library(tidyverse)
@@ -153,7 +153,9 @@ Infrastructure and utility functions (skip ahead to example usage)
     study_pop <- foreach (tag = source_tags, .combine = rbind, .packages = "readxl") %do% {
       read_xlsx(sprintf("./h%03d.xlsx", tag)) %>% select(N = matches("^IPDIS"), cost = matches("^IPFTCH"), INSURANCE = matches("^INSCOV"), INCOME = matches("^POVCAT"), AGELAST, SEX, DATAYEAR, BORNUSA)
     }
-    study_pop <- study_pop %>% mutate(across(everything(), as.numeric)) %>%
+    study_pop <- study_pop %>% mutate(across(everything(), as.numeric)) %>% mutate(across(everything(), ~ifelse(.x < 0, NA, .x)))
+    print(sprintf("MEPS - Years: %s, Rows: Total = %d, Complete = %d", paste(unique(study_pop$DATAYEAR), collapse = ", "), nrow(study_pop), nrow(study_pop %>% filter(complete.cases(.)))))
+    study_pop <- study_pop %>%
       filter(AGELAST >= 18, SEX > 0, INSURANCE > 0, INCOME > 0, BORNUSA > 0, (N == 0 & cost == 0) | (N > 0 & cost > 0)) %>%
       mutate(SEX       = factor(SEX,       levels = 1:2, labels = c("Male", "Female"))) %>%
       mutate(INSURANCE = factor(INSURANCE, levels = 1:3, labels = c("1: Private", "2: Public", "3: Uninsured"))) %>%
@@ -162,6 +164,7 @@ Infrastructure and utility functions (skip ahead to example usage)
       mutate(study_group = ifelse(BORNUSA == 1, "control", "intervention"))
     save(study_pop, file = target_file, compress = "xz")
   }
+  study_pop %>% group_by(study_group) %>% reframe(n = n(), prop_zero = round(100.0 * sum(cost == 0.0) / n, 2), mean_cost = sum(cost) / sum(N)) %>% flextable() %>% autofit()
 ```
 
 ## Placebo Study
@@ -169,58 +172,86 @@ Infrastructure and utility functions (skip ahead to example usage)
 We used a "placebo design" with real data: persons were randomly allocated two groups (intervention and control), so that the true cost difference is zero by construction. This follows the logic of placebo analyses (Bertrand et al., 2004; Eggers et al., 2024) and of randomization methods based on repeated random assignment. All regressions are adjusted for age, sex, and calendar year.
 
 ```{r placebo, warning = FALSE}
-  # regression model, adjusting for age, sex, and calendar year
-  formula1 <- outcome ~ study_group + AGELAST + SEX + DATAYEAR
-
-  # placebo allocation, parallel (needs %dorng%, must not use %dopar%)
-  set.seed(345)
-  pop_list <- foreach (i = 1:N_sim, .packages = "tidyverse") %dorng% {
-    list(study_pop %>% slice_sample(n = 2000, replace = FALSE) %>% mutate(study_group = ifelse(runif(nrow(.)) > 0.5, "control", "intervention")),
-         study_pop %>%                                             mutate(study_group = ifelse(runif(nrow(.)) > 0.5, "control", "intervention")))
-  }
-  pop_list <- list_flatten(pop_list)
-
-  # regressions fits, parallel
-  results <- foreach (i = 1:length(pop_list), .combine = rbind, .packages = c("tidyverse", "glm2", "mgcv", "glmmTMB")) %dopar% {
-    group_pop <- pop_list[[i]]
-
-    # one-stage models: Gaussian (identity), Gaussian (log), Gamma (identity), and Gamma (log)
-    m_gauss_id  <-   lm(formula1, data = group_pop %>% rename(outcome =  cost))
-    m_gauss_log <- glmx(formula1, data = group_pop %>% rename(outcome = pcost), family = gaussian(link = "log"))
-    m_gamma_id  <- glmx(formula1, data = group_pop %>% rename(outcome = pcost), family = Gamma(link = "identity"))
-    m_gamma_log <- glmx(formula1, data = group_pop %>% rename(outcome = pcost), family = Gamma(link = "log"))
-
-    # two-stage model: number of discharges times costs per discharge
-    m_events <- glmx_events(formula1, data = group_pop %>% rename(outcome = N))
-    m_pcosts <- glmx_pcosts(formula1, data = group_pop %>% rename(outcome = ecost) %>% filter(N > 0))
-
-    # marginal cost differences, evaluated on the study sample
-    rbind(marginal_one_stage(group_pop, m_gauss_id,         "Gaussian (identity)"),
-          marginal_one_stage(group_pop, m_gauss_log,        "Gaussian (log)"),
-          marginal_one_stage(group_pop, m_gamma_id,         "Gamma (identity)"),
-          marginal_one_stage(group_pop, m_gamma_log,        "Gamma (log)"),
-          marginal_two_stage(group_pop, m_events, m_pcosts, "Two-Stage Poisson-Gamma")) %>% mutate(N = nrow(group_pop))
+  target_file <- sprintf("./MEPS_Results_%d.Rdata", N_sim)
+  if (file.exists(target_file)) {
+    load(target_file)
+  } else {
+    # regression model, adjusting for age, sex, and calendar year
+    formula1 <- outcome ~ study_group + AGELAST + SEX + DATAYEAR
+  
+    # placebo allocation, parallel (needs %dorng%, must not use %dopar%)
+    set.seed(314159)
+    pop_list <- foreach (i = 1:N_sim, .packages = "tidyverse") %dorng% {
+      list(study_pop %>% slice_sample(n = 2000, replace = FALSE) %>% mutate(study_group = ifelse(runif(nrow(.)) > 0.5, "control", "intervention")), # mimic RCT
+           study_pop %>%                                             mutate(study_group = ifelse(runif(nrow(.)) > 0.5, "control", "intervention"))) # mimic Registry
+    }
+    pop_list <- list_flatten(pop_list)
+  
+    # regressions fits, parallel
+    results <- foreach (i = 1:length(pop_list), .combine = rbind, .packages = c("tidyverse", "glm2", "mgcv", "glmmTMB")) %dopar% {
+      group_pop <- pop_list[[i]]
+  
+      # one-stage models: Gaussian (identity), Gaussian (log), Gamma (identity), and Gamma (log)
+      m_gauss_id  <-   lm(formula1, data = group_pop %>% rename(outcome =  cost))
+      m_gauss_log <- glmx(formula1, data = group_pop %>% rename(outcome = pcost), family = gaussian(link = "log"))
+      m_gamma_id  <- glmx(formula1, data = group_pop %>% rename(outcome = pcost), family = Gamma(link = "identity"))
+      m_gamma_log <- glmx(formula1, data = group_pop %>% rename(outcome = pcost), family = Gamma(link = "log"))
+      
+      # two-stage model: number of discharges times costs per discharge
+      m_events <- glmx_events(formula1, data = group_pop %>% rename(outcome = N))
+      m_pcosts <- glmx_pcosts(formula1, data = group_pop %>% rename(outcome = ecost) %>% filter(N > 0))
+  
+      # marginal cost differences, evaluated on the study sample
+      rbind(marginal_one_stage(group_pop, m_gauss_id,         "Gaussian (identity)"),
+            marginal_one_stage(group_pop, m_gauss_log,        "Gaussian (log)"),
+            marginal_one_stage(group_pop, m_gamma_id,         "Gamma (identity)"),
+            marginal_one_stage(group_pop, m_gamma_log,        "Gamma (log)"),
+            marginal_two_stage(group_pop, m_events, m_pcosts, "Two-Stage Poisson-Gamma")) %>% mutate(N = nrow(group_pop))
+    }
+    save(results, file = target_file)
   }
 ```
 
 ## Results
 
 ```{r results}
+  # utility function to compute mean value and estimate its confidence interval from bootstrapping, allowing for NA values
+  mean_ci <- function(vec, n_boot = 10000, alpha = 0.01, digits = 2) {
+    v <- vec[!is.na(vec)]
+    n <- length(v)
+    b <- numeric(n_boot)
+    for (i in 1:n_boot) {
+      b[i] <- mean(v[sample(1:n, size = n, replace = TRUE)])
+    }
+    return(sprintf("%.*f [%.*f; %.*f]", digits, mean(v), digits, quantile(b, 0.5 * alpha), digits, quantile(b, 1.0 - 0.5 * alpha)))
+  }
+
+  # utility function to compute root mean squared value and estimate with confidence interval from bootstrapping, allowing for NA values
+  rmsq_ci <- function(vec, n_boot = 10000, alpha = 0.01, digits = 2) {
+    v <- vec[!is.na(vec)]
+    n <- length(v)
+    b <- numeric(n_boot)
+    for (i in 1:n_boot) {
+      b[i] <- sqrt(mean(v[sample(1:n, size = n, replace = TRUE)]^2))
+    }
+    return(sprintf("%.*f [%.*f; %.*f]", digits, sqrt(mean(v*v)), digits, quantile(b, 0.5 * alpha), digits, quantile(b, 1.0 - 0.5 * alpha)))
+  }
+
+  # aggregate results
   results %>% mutate(model = fct_inorder(model)) %>%
-    group_by(N, Model = model) %>% reframe(Bias     = mean(costdiff,           na.rm = TRUE),
-                                           MAE      = mean(abs(costdiff),      na.rm = TRUE),
-                                           RMSE     = sqrt(mean(costdiff^2,    na.rm = TRUE)),
-                                           IQR      = quantile(costdiff, 0.75, na.rm = TRUE) - quantile(costdiff, 0.25, na.rm = TRUE),
-                                           N_SIM_OK = sum(!is.na(costdiff))) %>%
-    mutate(across(-c(Model, N_SIM_OK, N), ~round(.x, 2))) %>%
-    flextable() %>% set_caption(sprintf("Placebo study (MEPS 2022-2024): Metrics in USD, N_SIM=%d", N_sim)) %>% autofit() %>% hline(c(5, 10))
+    group_by(N, Model = model) %>% reframe(Bias = mean_ci(    costdiff),
+                                           MAE  = mean_ci(abs(costdiff)),
+                                           RMSE = rmsq_ci(    costdiff)) %>%
+    pivot_longer(-c(N, Model), names_to = "Metric") %>% pivot_wider(names_from = Model, values_from = value) %>%
+    mutate(Type = ifelse(N != nrow(study_pop), "RCT", "Registry")) %>% select(Type, N, Metric, everything()) %>%
+    flextable() %>% set_caption(sprintf("Placebo study (MEPS 2022-2024): Metrics in USD [99%-CI], N_SIM=%d", N_sim)) %>% autofit() %>% hline(3)
 ```
 
 ## Figure
 
 ```{r figure}
-  plot_pdf_png("Figure_S6", aspect_ratio = 0.5,
-    results %>% filter(!is.na(costdiff)) %>% mutate(model = fct_rev(fct_inorder(model)), N = sprintf("N=%d", N)) %>%
+  plot_pdf_png("Figure_S6_Full", aspect_ratio = 1.0,
+    results %>% mutate(Type = ifelse(N != nrow(study_pop), "RCT", "Registry")) %>% filter(!is.na(costdiff)) %>% mutate(model = fct_rev(fct_inorder(model)), N = sprintf("%s, N=%d", Type, N)) %>%
     ggplot(aes(x = costdiff, y = model, fill = model)) +
       geom_vline(xintercept = 0, linetype = "dashed", color = "grey40") +
       geom_violin(alpha = 0.5, color = NA, scale = "width") +
@@ -230,5 +261,18 @@ We used a "placebo design" with real data: persons were randomly allocated two g
       labs(x = "Estimated cost difference [USD] (true value = 0.00 USD)", y = NULL, title = "Placebo study (MEPS 2022-2024)",
            subtitle = sprintf("%d random allocations; diamond = mean (bias), box = median and IQR", N_sim)) +
       theme_minimal(base_size = 11) +
-      theme(legend.position = "none", panel.grid.minor = element_blank(), plot.title = element_text(face = "bold")) + facet_wrap(~N, nrow = 1))
+      theme(legend.position = "none", panel.grid.minor = element_blank(), plot.title = element_text(face = "bold")) + facet_wrap(~N, ncol = 1))
+  plot_pdf_png("Figure_S6_Zoom", aspect_ratio = 1.0,
+    results %>% mutate(Type = ifelse(N != nrow(study_pop), "RCT", "Registry")) %>% filter(!is.na(costdiff)) %>% mutate(model = fct_rev(fct_inorder(model)), N = sprintf("%s, N=%d", Type, N)) %>%
+    ggplot(aes(x = costdiff, y = model, fill = model)) +
+      geom_vline(xintercept = 0, linetype = "dashed", color = "grey40") +
+      geom_violin(alpha = 0.5, color = NA, scale = "width") +
+      geom_boxplot(width = 0.15, outlier.shape = NA, fill = "white", color = "grey20") +
+      stat_summary(fun = mean, geom = "point", orientation = "y", shape = 23, size = 2.5, fill = "black") +
+      scale_fill_brewer(palette = "Set2") +
+      scale_x_continuous(limits = c(-5000.0, 5000.0)) +
+      labs(x = "Estimated cost difference [USD] (true value = 0.00 USD)", y = NULL, title = "Placebo study (MEPS 2022-2024)",
+           subtitle = sprintf("%d random allocations; diamond = mean (bias), box = median and IQR", N_sim)) +
+      theme_minimal(base_size = 11) +
+      theme(legend.position = "none", panel.grid.minor = element_blank(), plot.title = element_text(face = "bold")) + facet_wrap(~N, ncol = 1))
 ```
