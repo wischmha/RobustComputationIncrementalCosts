@@ -1,6 +1,6 @@
 ---
 title:    "Patient-level simulation and model comparison for robust incremental cost estimation"
-subtitle: "Online Resource 5: Usage Example"
+subtitle: "Online Resource 6: Usage Example"
 author:   "Charité - Universitätsmedizin Berlin\n\nInstitute of Public Health\n\nHans-Aloys Wischmann, Toivo Glatz"
 date:     "** **\n\nEdited: 2026-11-11, Executed: `r Sys.Date()`"
 output:   word_document
