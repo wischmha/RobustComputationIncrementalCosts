@@ -2,7 +2,7 @@
 title:    "Patient-level simulation and model comparison for robust incremental cost estimation"
 subtitle: "Online Resource 3: Data Analysis"
 author:   "Charité - Universitätsmedizin Berlin\n\nInstitute of Public Health\n\nHans-Aloys Wischmann, Toivo Glatz"
-date:     "** **\n\nEdited: 2026-11-11, Executed: `r Sys.Date()`"
+date:     "** **\n\nEdited: 2026-11-19, Executed: `r Sys.Date()`"
 output:   word_document
 ---
 
@@ -25,7 +25,7 @@ output:   word_document
 
 ## Robust Regressions
 
-To benefit from its more robust step-halving approach and thus improved convergence. glm2::glm2() is added as a drop-in replacement for the generic stats::glm(). Regression fits using glm() and glm2() are provided with valid starting points, so as to overcome known failures in determining initial parameter estimates. Two additional regression fits are always performed using mgcv::gam() and glmmTMB::glmmTMB() as alternative implementations from different packages. Note that mgcv::bam() is optimized for speed and may be required to handle huge datasets, while mgcv::gam() is optimized for convergence, so that the latter is included into the robust regression wrapper. Finally, the best fit is determined, defined as an RSS (sum of squared response residuals) equal to the minimum RSS, and the best such fit is returned.
+To benefit from its more robust step-halving approach and thus improved convergence. glm2::glm2() is added as a drop-in replacement for the generic stats::glm(). Regression fits using glm() and glm2() are provided with valid starting points, so as to overcome known failures in determining initial parameter estimates. Two additional regression fits are always performed using mgcv::gam() and glmmTMB::glmmTMB() as alternative implementations from different packages. Note that mgcv::bam() is optimized for speed and may be required to handle huge datasets, while mgcv::gam() is optimized for convergence, so that the latter is included into the robust regression wrapper. Finally, the best fit is determined, defined as an AIC (sum of squared response residuals) equal to the minimum AIC, and the best such fit is returned.
 
 ```{r robust_regressions}
   # overcomes glm/glm2 (log-link) error "no valid set of coefficients has been found: please supply starting values"
@@ -48,15 +48,15 @@ To benefit from its more robust step-halving approach and thus improved converge
   get_best_model <- function(m_list) {
     returned  <- map_lgl(m_list,  ~       !is.null(.x))
     converged <- map_lgl(m_list,  ~ifelse(!is.null(.x), class(.x)[1] == "lm" || (class(.x)[1] %in% c("glm", "gam") && .x$converged[1]) || (class(.x)[1] == "glmmTMB" && .x$fit$convergence == 0), FALSE))
-    RSSs      <- map_dbl(m_list,  ~ifelse(!is.null(.x), sum(resid(.x, type = "response")^2), NA))
-    valid_RSS <- !is.na(RSSs)
-    if (sum(valid_RSS) == 0) { return(NULL) }
-    best_RSS <- which.min(RSSs)
-    m_list[[best_RSS]]$returned  <- returned
-    m_list[[best_RSS]]$converged <- converged
-    m_list[[best_RSS]]$valid_RSS <- valid_RSS
-    m_list[[best_RSS]]$best_RSS  <- ifelse(!is.na(RSSs), RSSs == min(RSSs, na.rm = TRUE), FALSE)
-    return(m_list[[best_RSS]])
+    AICs      <- map_dbl(m_list,  ~ifelse(!is.null(.x), AIC(.x), NA))
+    valid_AIC <- converged & !is.na(AICs)
+    if (sum(valid_AIC) == 0) { return(NULL) }
+    best_AIC <- which.min(AICs)
+    m_list[[best_AIC]]$returned  <- returned
+    m_list[[best_AIC]]$converged <- converged
+    m_list[[best_AIC]]$valid_AIC <- valid_AIC
+    m_list[[best_AIC]]$best_AIC  <- ifelse(!is.na(AICs), AICs == min(AICs, na.rm = TRUE), FALSE)
+    return(m_list[[best_AIC]])
   }
 
   # wrapper function around glm, glm2::glm2, mgcv::gam, and glmmTMB::glmmTMB, selecting the best among multiple fits
@@ -70,12 +70,11 @@ To benefit from its more robust step-halving approach and thus improved converge
     return(get_best_model(models))
   }
 
-  # wrapper to select the best fit among gaussian and poisson, the latter with identity link or log-link, for counts
+  # wrapper to select the best fit among poisson, the latter with identity link or log-link, for counts
   glmx_events <- function(formula, data) {
-    models <- list(NULL, NULL, NULL)
-    try(models[[1]] <-   lm(formula, data))
-    try(models[[2]] <- glmx(formula, data, family = poisson(link = "identity")))
-    try(models[[3]] <- glmx(formula, data, family = poisson(link = "log")))
+    models <- list(NULL, NULL)
+    try(models[[1]] <- glmx(formula, data, family = poisson(link = "identity")))
+    try(models[[2]] <- glmx(formula, data, family = poisson(link = "log")))
     return(get_best_model(models))
   }
 
