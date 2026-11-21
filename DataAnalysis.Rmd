@@ -2,7 +2,7 @@
 title:    "Patient-level simulation and model comparison for robust incremental cost estimation"
 subtitle: "Online Resource 3: Data Analysis"
 author:   "Charité - Universitätsmedizin Berlin\n\nInstitute of Public Health\n\nHans-Aloys Wischmann, Toivo Glatz"
-date:     "** **\n\nEdited: 2026-11-19, Executed: `r Sys.Date()`"
+date:     "** **\n\nEdited: 2026-11-21, Executed: `r Sys.Date()`"
 output:   word_document
 ---
 
@@ -20,38 +20,22 @@ output:   word_document
 
   # set chunk defaults, prepare to analyze simulations in parallel (no random numbers)
   knitr::opts_chunk$set(echo = FALSE, fig.width = 6.0, dpi = 600, comment = NA)
-  registerDoParallel(get_num_procs()); blas_set_num_threads(min(6, get_num_cores()))
+  registerDoParallel(get_num_cores()); blas_set_num_threads(min(4, get_num_cores()))
 ```
 
 ## Robust Regressions
 
-To benefit from its more robust step-halving approach and thus improved convergence. glm2::glm2() is added as a drop-in replacement for the generic stats::glm(). Regression fits using glm() and glm2() are provided with valid starting points, so as to overcome known failures in determining initial parameter estimates. Two additional regression fits are always performed using mgcv::gam() and glmmTMB::glmmTMB() as alternative implementations from different packages. Note that mgcv::bam() is optimized for speed and may be required to handle huge datasets, while mgcv::gam() is optimized for convergence, so that the latter is included into the robust regression wrapper. Finally, the best fit is determined, defined as an AIC (sum of squared response residuals) equal to the minimum AIC, and the best such fit is returned.
+To benefit from its more robust step-halving approach and thus improved convergence. glm2::glm2() is added as a drop-in replacement for the generic stats::glm(). Regression fits using glm() and glm2() are provided with valid starting points, so as to overcome known failures in determining initial parameter estimates. One additional regression fit is always performed using glmmTMB::glmmTMB() as an alternative implementations from a different package. Finally, the best fit is determined, defined as an AIC equal to the minimum AIC among the models that converged, because all models use ML (maximum likelihood) estimation.
 
 ```{r robust_regressions}
-  # overcomes glm/glm2 (log-link) error "no valid set of coefficients has been found: please supply starting values"
-  glmx_start <- function(formula, data, family) {
-    m <- lm(formula, data)
-    c <- coef(m)
-    if (family$link == "identity") {
-      c[names(c) == "(Intercept)"] <- mean(predict(m))
-      c[names(c) != "(Intercept)"] <- 0.0
-    } else if (family$link == "log") {
-      c[names(c) == "(Intercept)"] <- log(mean(predict(m)))
-      c[names(c) != "(Intercept)"] <- 0.0
-    } else {
-      c[] <- 1.0
-    }
-    return(c)
-  }
-
   # utility function to select best regression fit, instrumented to track performance
-  get_best_model <- function(m_list) {
+  glmx_best_model <- function(m_list) {
     returned  <- map_lgl(m_list,  ~       !is.null(.x))
-    converged <- map_lgl(m_list,  ~ifelse(!is.null(.x), class(.x)[1] == "lm" || (class(.x)[1] %in% c("glm", "gam") && .x$converged[1]) || (class(.x)[1] == "glmmTMB" && .x$fit$convergence == 0), FALSE))
-    AICs      <- map_dbl(m_list,  ~ifelse(!is.null(.x), AIC(.x), NA))
-    valid_AIC <- converged & !is.na(AICs)
+    converged <- map_lgl(m_list,  ~ifelse(!is.null(.x),   class(.x)[1] == "lm" || (class(.x)[1] == "glm" && .x$converged[1]) || (class(.x)[1] == "glmmTMB" && .x$fit$convergence == 0), FALSE))
+    AICs      <- map_dbl(m_list,  ~ifelse(!is.null(.x) & (class(.x)[1] == "lm" || (class(.x)[1] == "glm" && .x$converged[1]) || (class(.x)[1] == "glmmTMB" && .x$fit$convergence == 0)), AIC(.x), NA))
+    valid_AIC <- !is.na(AICs)
     if (sum(valid_AIC) == 0) { return(NULL) }
-    best_AIC <- which.min(AICs)
+    best_AIC <- which.min(AICs) # which.min ignores NA and NaN
     m_list[[best_AIC]]$returned  <- returned
     m_list[[best_AIC]]$converged <- converged
     m_list[[best_AIC]]$valid_AIC <- valid_AIC
@@ -59,15 +43,22 @@ To benefit from its more robust step-halving approach and thus improved converge
     return(m_list[[best_AIC]])
   }
 
-  # wrapper function around glm, glm2::glm2, mgcv::gam, and glmmTMB::glmmTMB, selecting the best among multiple fits
+  # wrapper function around glm, glm2::glm2, and glmmTMB::glmmTMB, selecting the best among multiple fits
+  # ML (not REML) is required for AIC comparisons across packages, to ensure comparable likelihood estimation
+  # lm() provides starting values to overcome glm/glm2 error "no valid set of coefficients has been found: please supply starting values"
+  # non-ML gam() provides an alternative set of starting values for glmmTMB()
   glmx <- function(formula, data, family) {
-    s <- glmx_start(formula, data, family)
+    s2 <- coef(gam(formula, family, data)) # default (non-ML) mgcv::gam() returns reliably
+    s1 <- s2                               # copy names of predictors as lm() may silently remove some
+    s1[which(names(s1) != "(Intercept)")] <- 0.0
+    s1[which(names(s1) == "(Intercept)")] <- mean(predict(lm(formula, data), type = "response"))
+    if (family$link == "log") s1[which(names(s1) == "(Intercept)")] <- log(s1[which(names(s1) == "(Intercept)")])
     models <- list(NULL, NULL, NULL, NULL)
-    try (models[[1]] <-     glm(formula, family, data, start = s))
-    try (models[[2]] <-    glm2(formula, family, data, start = s))
-    try (models[[3]] <-     gam(formula, family, data))
-    try (models[[4]] <- glmmTMB(formula, data, family, start = list(beta = s), na.action = na.exclude))
-    return(get_best_model(models))
+    try(models[[1]] <-     glm(formula, family, data, start = s1))
+    try(models[[2]] <-    glm2(formula, family, data, start = s1))
+    try(models[[3]] <- glmmTMB(formula, data, family, start = list(beta = s1), REML = FALSE, na.action = na.exclude))
+    try(models[[4]] <- glmmTMB(formula, data, family, start = list(beta = s2), REML = FALSE, na.action = na.exclude))
+    return(glmx_best_model(models))
   }
 
   # wrapper to select the best fit among poisson, the latter with identity link or log-link, for counts
@@ -75,7 +66,7 @@ To benefit from its more robust step-halving approach and thus improved converge
     models <- list(NULL, NULL)
     try(models[[1]] <- glmx(formula, data, family = poisson(link = "identity")))
     try(models[[2]] <- glmx(formula, data, family = poisson(link = "log")))
-    return(get_best_model(models))
+    return(glmx_best_model(models))
   }
 
   # wrapper to select the best fit among gamma regressions with identity link or log-link, for positive costs
@@ -83,7 +74,7 @@ To benefit from its more robust step-halving approach and thus improved converge
     models <- list(NULL, NULL)
     try(models[[1]] <- glmx(formula, data, family = Gamma(link = "identity")))
     try(models[[2]] <- glmx(formula, data, family = Gamma(link = "log")))
-    return(get_best_model(models))
+    return(glmx_best_model(models))
   }
 
   # utility function to extract marginal cost difference for single stage model evaluated on target population (can be the study population)
@@ -131,7 +122,7 @@ To benefit from its more robust step-halving approach and thus improved converge
     m_gamma2_log <- glmx(f, data = study_pop %>% rename(outcome = pcosts2), family = Gamma(link = "log"))
 
     # estimate number of events times costs per event (pre-defined adaptive sensitivity analysis), where events may be derived from a constant
-    # rate (leading to a poisson distribution), but may include zero-inflation and/or over-dispersion, so that the best (lowest RSS) of gaussian
+    # rate (leading to a poisson distribution), but may include zero-inflation and/or over-dispersion, so that the best (lowest AIC) of gaussian
     # and poisson (with identity or log-link) regression fits prevails
     m_events <- glmx_events(f, data = study_pop %>% rename(outcome = events))
     m_pcosts <- glmx_pcosts(f, data = study_pop %>% rename(outcome = ecosts) %>% filter(events > 0))
@@ -150,12 +141,12 @@ To benefit from its more robust step-halving approach and thus improved converge
     m_list <- compact(list(m_gauss1_log, m_gauss2_log, m_gamma1_id, m_gamma2_id, m_gamma1_log, m_gamma2_log))
     returned  <- paste(rowSums(sapply(m_list, function(x) x$returned)),  collapse = "/")
     converged <- paste(rowSums(sapply(m_list, function(x) x$converged)), collapse = "/")
-    valid_RSS <- paste(rowSums(sapply(m_list, function(x) x$valid_RSS)), collapse = "/")
-    best_RSS  <- paste(rowSums(sapply(m_list, function(x) x$best_RSS)),  collapse = "/")
+    valid_AIC <- paste(rowSums(sapply(m_list, function(x) x$valid_AIC)), collapse = "/")
+    best_AIC  <- paste(rowSums(sapply(m_list, function(x) x$best_AIC)),  collapse = "/")
     
     # free up memory, return data frame of results
     rm(study_pop, m_events, m_pcosts, m_gauss_id, m_gauss1_log, m_gauss2_log, m_gamma1_id, m_gamma2_id, m_gamma1_log, m_gamma2_log); invisible(gc(full = TRUE))
-    rbind(ziGamma, Gauss_id, Gauss1_log, Gauss2_log, Gamma1_id, Gamma2_id, Gamma1_log, Gamma2_log) %>% mutate(returned, converged, valid_RSS, best_RSS, N = j, f = deparse(f))
+    rbind(ziGamma, Gauss_id, Gauss1_log, Gauss2_log, Gamma1_id, Gamma2_id, Gamma1_log, Gamma2_log) %>% mutate(returned, converged, valid_AIC, best_AIC, N = j, f = deparse(f))
   }
 
   # replace acronyms by speaking names for regression models, save for later post-processing

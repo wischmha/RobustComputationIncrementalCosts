@@ -2,7 +2,7 @@
 title:    "Patient-level simulation and model comparison for robust incremental cost estimation"
 subtitle: "Online Resource 5: Placebo study using MEPS data"
 author:   "Charité - Universitätsmedizin Berlin\n\nInstitute of Public Health\n\nPaula Filser, Hans-Aloys Wischmann, Toivo Glatz"
-date:     "** **\n\nEdited: 2026-11-20, Executed: `r Sys.Date()`"
+date:     "** **\n\nEdited: 2026-11-21, Executed: `r Sys.Date()`"
 output:   word_document
 ---
 
@@ -18,8 +18,8 @@ This R markdown script demonstrates the practical use of our proposed helper fun
 ## Setup and Libraries
 
 ```{r setup, include = FALSE}
-  N_sim  <- 1000 # should be at least 1000
-  N_boot <- 5000 # should be at least 5000
+  N_sim  <-  1000 # should be at least  1000
+  N_boot <- 10000 # should be at least 10000
 
   # source, intermediate, and target files
   meps2024_remote <- "https://meps.ahrq.gov/mepsweb/data_files/pufs/h256/h256xlsx.zip"
@@ -73,20 +73,19 @@ Infrastructure and utility functions (skip ahead to dataset)
 
   # wrapper function around glm, glm2::glm2, and glmmTMB::glmmTMB, selecting the best among multiple fits
   # ML (not REML) is required for AIC comparisons across packages, to ensure comparable likelihood estimation
-  # gam(REML) is used to overcome glm/glm2 error "no valid set of coefficients has been found: please supply starting values"
+  # lm() provides starting values to overcome glm/glm2 error "no valid set of coefficients has been found: please supply starting values"
+  # non-ML gam() provides an alternative set of starting values for glmmTMB()
   glmx <- function(formula, data, family) {
-    g <- gam(formula, family, data)
-    s <- coef(g)
-    models <- list(NULL, NULL, NULL)
-    try(models[[1]] <-     glm(formula, family, data, start = s))
-    try(models[[2]] <-    glm2(formula, family, data, start = s))
-    try(models[[3]] <- glmmTMB(formula, data, family, start = list(beta = s), REML = FALSE, na.action = na.exclude))
-    s[which(names(s) != "(Intercept)")] <- 0.0
-    s[which(names(s) == "(Intercept)")] <- mean(predict(g, type = "response"))
-    if (family$link == "log") s[which(names(s) == "(Intercept)")] <- log(s[which(names(s) == "(Intercept)")])
-    if (is.null(models[[1]])) try(models[[1]] <-     glm(formula, family, data, start = s))
-    if (is.null(models[[2]])) try(models[[2]] <-    glm2(formula, family, data, start = s))
-    if (is.null(models[[3]])) try(models[[3]] <- glmmTMB(formula, data, family, start = list(beta = s), REML = FALSE, na.action = na.exclude))
+    s2 <- coef(gam(formula, family, data)) # default (non-ML) mgcv::gam() returns reliably
+    s1 <- s2                               # copy names of predictors as lm() may silently remove some
+    s1[which(names(s1) != "(Intercept)")] <- 0.0
+    s1[which(names(s1) == "(Intercept)")] <- mean(predict(lm(formula, data), type = "response"))
+    if (family$link == "log") s1[which(names(s1) == "(Intercept)")] <- log(s1[which(names(s1) == "(Intercept)")])
+    models <- list(NULL, NULL, NULL, NULL)
+    try(models[[1]] <-     glm(formula, family, data, start = s1))
+    try(models[[2]] <-    glm2(formula, family, data, start = s1))
+    try(models[[3]] <- glmmTMB(formula, data, family, start = list(beta = s1), REML = FALSE, na.action = na.exclude))
+    try(models[[4]] <- glmmTMB(formula, data, family, start = list(beta = s2), REML = FALSE, na.action = na.exclude))
     return(glmx_best_model(models))
   }
 
@@ -137,8 +136,8 @@ Infrastructure and utility functions (skip ahead to dataset)
 
 ```{r dataset}
   if (!file.exists(meps2024_local)) {
-    temp_file <- tempfile(); download.file(remove_meps, temp_file, method = "auto"); unzip(temp_file, overwrite = TRUE, junkpaths = TRUE); unlink(temp_file)
-  } 
+    temp_file <- tempfile(); download.file(meps2024_remote, temp_file, method = "auto"); unzip(temp_file, overwrite = TRUE, junkpaths = TRUE); unlink(temp_file)
+  }
   study_pop <- read_xlsx(meps2024_local) %>%
     select(N = matches("^IPDIS"), cost = matches("^IPFTCH"), INSURANCE = matches("^INSCOV"), INCOME = matches("^POVCAT"), DATAYEAR, AGELAST, SEX, BORNUSA) %>%
     mutate(across(everything(), as.numeric)) %>% mutate(across(everything(), ~ifelse(.x < 0, NA, .x))) %>% filter(AGELAST >= 18)

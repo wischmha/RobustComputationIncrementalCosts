@@ -2,7 +2,7 @@
 title:    "Patient-level simulation and model comparison for robust incremental cost estimation"
 subtitle: "Online Resource 4: Data Postprocessing"
 author:   "Charité - Universitätsmedizin Berlin\n\nInstitute of Public Health\n\nHans-Aloys Wischmann, Toivo Glatz"
-date:     "** **\n\nEdited: 2026-11-01, Executed: `r Sys.Date()`"
+date:     "** **\n\nEdited: 2026-11-21, Executed: `r Sys.Date()`"
 output:   word_document
 ---
 
@@ -21,7 +21,7 @@ output:   word_document
   mean_ci <- function(vec, n_boot = 10000, alpha = 0.01, digits = 2) {
     v <- vec[!is.na(vec)]
     n <- length(v)
-    b <- numeric(n_boot)
+    b <- vector(mode = "double", n_boot)
     for (i in 1:n_boot) {
       b[i] <- mean(v[sample(1:n, size = n, replace = TRUE)])
     }
@@ -32,26 +32,26 @@ output:   word_document
   rmsq_ci <- function(vec, n_boot = 10000, alpha = 0.01, digits = 2) {
     v <- vec[!is.na(vec)]
     n <- length(v)
-    b <- numeric(n_boot)
+    b <- vector(mode = "double", n_boot)
     for (i in 1:n_boot) {
       b[i] <- sqrt(mean(v[sample(1:n, size = n, replace = TRUE)]^2))
     }
     return(sprintf("%.*f [%.*f; %.*f]", digits, sqrt(mean(v*v)), digits, quantile(b, 0.5 * alpha), digits, quantile(b, 1.0 - 0.5 * alpha)))
   }
 
-  # utility function to plot in high resolution to *.png and *.pdf file and inline (using R markdown syntax)
+  # utility function to plot in high resolution to *.png and *.pdf file and inline
   plot_pdf_png <- function(file_name, aspect_ratio, plot_object, plot_width = 6.0, plot_res = 600) {
     themed_object <- plot_object + theme(text = element_text(size = 10), plot.title = element_text(size = 10))
-    pdf(sprintf("%s.pdf", file_name), width = plot_width, height = plot_width * aspect_ratio, paper = "a4");                 print(themed_object); ignore <- dev.off()
     png(sprintf("%s.png", file_name), width = plot_width, height = plot_width * aspect_ratio, units = "in", res = plot_res); print(themed_object); ignore <- dev.off()
-    cat(sprintf("![](%s.png)\n", file_name))
+    pdf(sprintf("%s.pdf", file_name), width = plot_width, height = plot_width * aspect_ratio, paper = "a4");                 print(themed_object); ignore <- dev.off()
+    knitr::include_graphics(sprintf("%s.png", file_name))
   }
 ```
 
 ## Data Postprocessing
 
 ```{r postprocessing, results = "asis"}
-  # load data generation and data analysis results, plot cost distribution (across all runs), note that ggplot stacks after log-transformation, which is discouraged (and wrong)
+  # load data analysis results, plot cost distribution (across all runs), note that ggplot stacks after log-transformation, which is discouraged (and wrong)
   load("./DataGeneration.Rdata")
   load("./DataAnalysis.Rdata")
 
@@ -74,11 +74,11 @@ output:   word_document
     res <- results %>% filter(f == regression_models[m]) %>% select(-f)
 
     # analyze robustness of different regression function implementations (already summed in data analysis across Gaussian log and Gamma models)
-    res %>% filter(grepl("Two-Stage", model)) %>% select(N, returned, converged, valid_RSS, best_RSS) %>% separate_wider_delim(!N, delim = "/", names_sep = "") %>%
+    res %>% filter(grepl("Two-Stage", model)) %>% select(N, returned, converged, valid_AIC, best_AIC) %>% separate_wider_delim(!N, delim = "/", names_sep = "") %>%
       group_by(N) %>% reframe(across(everything(), ~sum(as.integer(.x)))) %>% pivot_longer(!N, names_to = "Status") %>% pivot_wider(names_from = N, values_from = value) %>%
-      mutate(Model  = factor(str_replace_all(Status, c("[a-zA-Z_]*" = "")), levels = 1:4, labels = c("glm+start", "glm2+start", "gam", "glmmTMB+start"))) %>%
-      mutate(Status = factor(str_replace_all(Status, c("[0-9]*"     = "")), levels = c("returned", "converged", "valid_RSS", "best_RSS"))) %>%
-      select(Model, Status, everything()) %>% arrange(Model, Status) %>% mutate(Status = str_replace(Status, "best_RSS", "(co-)optimum")) %>%
+      mutate(Model  = factor(str_replace_all(Status, c("[a-zA-Z_]*" = "")), levels = 1:4, labels = c("glm+start1", "glm2+start1", "glmmTMB+start1", "glmmTMB+start2"))) %>%
+      mutate(Status = factor(str_replace_all(Status, c("[0-9]*"     = "")), levels = c("returned", "converged", "valid_AIC", "best_AIC"))) %>%
+      select(Model, Status, everything()) %>% arrange(Model, Status) %>% mutate(Status = str_replace(Status, "best_AIC", "(co-)optimum")) %>%
       flextable() %>%
         set_caption(sprintf("Table S1 (%s): Convergence of Gauss(log) and Gamma regressions (perfect = %d)", m_name, 6 * n_sim)) %>%
         autofit() %>% hline(c(4, 8, 12)) %>% align(j = -2:-1, align = "right", part = "body") %>% flextable_to_rmd()
@@ -87,7 +87,7 @@ output:   word_document
     set.seed(314159)
 
     # subtract true population effects (theta), by study group, compute cost difference, Bias and Mean Absolute Error (MAE) (serial execution, to avoid potential issues with random number generators)
-    res  <- res %>% select(-returned, -converged, -valid_RSS, -best_RSS) %>% mutate(costdiff = costdiff - true_cost$difference)
+    res  <- res %>% select(-returned, -converged, -valid_AIC, -best_AIC) %>% mutate(costdiff = costdiff - true_cost$difference)
     bias <- res %>% mutate(model = fct_inorder(model)) %>% group_by(N, model) %>% reframe(across(everything(), ~mean_ci(    .x)))  %>% mutate(Metric = "Bias")
     mae  <- res %>% mutate(model = fct_inorder(model)) %>% group_by(N, model) %>% reframe(across(everything(), ~mean_ci(abs(.x)))) %>% mutate(Metric = "MAE")
     rmse <- res %>% mutate(model = fct_inorder(model)) %>% group_by(N, model) %>% reframe(across(everything(), ~rmsq_ci(    .x)))  %>% mutate(Metric = "RMSE")
@@ -112,7 +112,7 @@ output:   word_document
       res %>% select(N, model, costdiff) %>% mutate(model = fct_inorder(model)) %>%
       ggplot(aes(sample = costdiff, color = model, shape = model)) +
         stat_qq_line() + stat_qq(size = 0.5) + scale_x_continuous(limits = c(-3.5, 3.5), breaks = -3:3) + scale_y_continuous(limits = c(-2500.0, 2500.0)) + scale_shape_manual(values = c(1:2, 5:6, 3:4, 7:8)) +
-        labs(y = "Observed errors [EUR]", x = "Theoretical distribution of errors [standard deviations]", color = "", shape = "") +
+        labs(y = "Observed errors [EUR]", x = "Theoretical distribution of estimate errors [standard deviations]", color = "", shape = "") +
         theme(legend.position = "top", legend.direction = "horizontal", legend.title.position = "top", legend.byrow = TRUE) + facet_wrap(~N))
 
     # scatter plot of errors (theta_i - theta) across all simulation runs, for each pair of analysis methods, maximum study size
@@ -125,7 +125,7 @@ output:   word_document
     }
     plot_pdf_png(sprintf("Figure_S5_%s", m_name), 1.0,
       pairwise %>% mutate(nx = fct_inorder(nx), ny = fct_inorder(ny)) %>%
-      ggplot(aes(x = x, y = y)) + geom_point(size = 0.1) + labs(x = "Errors [EUR]", y = "Errors [EUR]") +
+      ggplot(aes(x = x, y = y)) + geom_point(size = 0.1) + labs(x = "Estimate errors [EUR]", y = "Estimate errors [EUR]") +
         scale_x_continuous(limits = c(-600, 600), breaks = seq(-400, 400, 400)) + scale_y_continuous(limits = c(-600, 600), breaks = seq(-400, 400, 400)) + facet_grid(vars(nx), vars(ny)))
   }
 ```

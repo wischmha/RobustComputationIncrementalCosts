@@ -2,7 +2,7 @@
 title:    "Patient-level simulation and model comparison for robust incremental cost estimation"
 subtitle: "Online Resource 6: Usage Example"
 author:   "Charité - Universitätsmedizin Berlin\n\nInstitute of Public Health\n\nHans-Aloys Wischmann, Toivo Glatz"
-date:     "** **\n\nEdited: 2026-11-20, Executed: `r Sys.Date()`"
+date:     "** **\n\nEdited: 2026-11-21, Executed: `r Sys.Date()`"
 output:   word_document
 ---
 
@@ -58,20 +58,19 @@ Infrastructure and utility functions (skip ahead to example usage)
 
   # wrapper function around glm, glm2::glm2, and glmmTMB::glmmTMB, selecting the best among multiple fits
   # ML (not REML) is required for AIC comparisons across packages, to ensure comparable likelihood estimation
-  # gam(REML) is used to overcome glm/glm2 error "no valid set of coefficients has been found: please supply starting values"
+  # lm() provides starting values to overcome glm/glm2 error "no valid set of coefficients has been found: please supply starting values"
+  # non-ML gam() provides an alternative set of starting values for glmmTMB()
   glmx <- function(formula, data, family) {
-    g <- gam(formula, family, data)
-    s <- coef(g)
-    models <- list(NULL, NULL, NULL)
-    try(models[[1]] <-     glm(formula, family, data, start = s))
-    try(models[[2]] <-    glm2(formula, family, data, start = s))
-    try(models[[3]] <- glmmTMB(formula, data, family, start = list(beta = s), REML = FALSE, na.action = na.exclude))
-    s[which(names(s) != "(Intercept)")] <- 0.0
-    s[which(names(s) == "(Intercept)")] <- mean(predict(g, type = "response"))
-    if (family$link == "log") s[which(names(s) == "(Intercept)")] <- log(s[which(names(s) == "(Intercept)")])
-    if (is.null(models[[1]])) try(models[[1]] <-     glm(formula, family, data, start = s))
-    if (is.null(models[[2]])) try(models[[2]] <-    glm2(formula, family, data, start = s))
-    if (is.null(models[[3]])) try(models[[3]] <- glmmTMB(formula, data, family, start = list(beta = s), REML = FALSE, na.action = na.exclude))
+    s2 <- coef(gam(formula, family, data)) # default (non-ML) mgcv::gam() returns reliably
+    s1 <- s2                               # copy names of predictors as lm() may silently remove some
+    s1[which(names(s1) != "(Intercept)")] <- 0.0
+    s1[which(names(s1) == "(Intercept)")] <- mean(predict(lm(formula, data), type = "response"))
+    if (family$link == "log") s1[which(names(s1) == "(Intercept)")] <- log(s1[which(names(s1) == "(Intercept)")])
+    models <- list(NULL, NULL, NULL, NULL)
+    try(models[[1]] <-     glm(formula, family, data, start = s1))
+    try(models[[2]] <-    glm2(formula, family, data, start = s1))
+    try(models[[3]] <- glmmTMB(formula, data, family, start = list(beta = s1), REML = FALSE, na.action = na.exclude))
+    try(models[[4]] <- glmmTMB(formula, data, family, start = list(beta = s2), REML = FALSE, na.action = na.exclude))
     return(glmx_best_model(models))
   }
 
@@ -122,7 +121,7 @@ Infrastructure and utility functions (skip ahead to example usage)
 
 ```{r dataset}
   if (!file.exists(meps2024_local)) {
-    temp_file <- tempfile(); download.file(remove_meps, temp_file, method = "auto"); unzip(temp_file, overwrite = TRUE, junkpaths = TRUE); unlink(temp_file)
+    temp_file <- tempfile(); download.file(meps2024_remote, temp_file, method = "auto"); unzip(temp_file, overwrite = TRUE, junkpaths = TRUE); unlink(temp_file)
   } 
   study_pop <- read_xlsx(meps2024_local) %>%
     select(N = matches("^IPDIS"), cost = matches("^IPFTCH"), INSURANCE = matches("^INSCOV"), INCOME = matches("^POVCAT"), DATAYEAR, AGELAST, SEX, BORNUSA) %>%
@@ -155,11 +154,11 @@ Regression models are adjusted for sex, age in years, income category, and insur
 
   # check convergence and best AIC (arrays for glm* implementations from different packages) and identity-link vs. log-link
   print("Convergence:")
-  print(paste("Gamma log-link (glm, glm2, glmmTMB):",                paste(m_Gamma_log$converged, collapse = ", ")))
+  print(paste("Gamma log-link (glm, glm2, glmmTMB s1/s2):",          paste(m_Gamma_log$converged, collapse = ", ")))
   print(paste("Number of Events (Poisson identity-link, log-link):", paste(m_Events$converged,    collapse = ", ")))
   print(paste("Costs per event (Gamma identity-link, log-link):",    paste(m_Ecosts$converged,    collapse = ", ")))
   print("Best AIC:")
-  print(paste("Gamma log-link (glm, glm2, glmmTMB):",                paste(m_Gamma_log$best_AIC, collapse = ", ")))
+  print(paste("Gamma log-link (glm, glm2, glmmTMB s1/s2):",          paste(m_Gamma_log$best_AIC, collapse = ", ")))
   print(paste("Number of Events (Poisson identity-link, log-link):", paste(m_Events$best_AIC,    collapse = ", ")))
   print(paste("Costs per event (Gamma identity-link, log-link):",    paste(m_Ecosts$best_AIC,    collapse = ", ")))
 ```
