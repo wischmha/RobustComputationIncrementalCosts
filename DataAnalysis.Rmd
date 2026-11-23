@@ -20,7 +20,7 @@ output:   word_document
 
   # set chunk defaults, prepare to analyze simulations in parallel (no random numbers)
   knitr::opts_chunk$set(echo = FALSE, fig.width = 6.0, dpi = 600, comment = NA)
-  registerDoParallel(get_num_cores()); blas_set_num_threads(min(4, get_num_cores()))
+  registerDoParallel(get_num_procs()); blas_set_num_threads(min(4, get_num_cores()))
 ```
 
 ## Robust Regressions
@@ -53,11 +53,12 @@ To benefit from its more robust step-halving approach and thus improved converge
     s1[which(names(s1) != "(Intercept)")] <- 0.0
     s1[which(names(s1) == "(Intercept)")] <- mean(predict(lm(formula, data), type = "response"))
     if (family$link == "log") s1[which(names(s1) == "(Intercept)")] <- log(s1[which(names(s1) == "(Intercept)")])
-    models <- list(NULL, NULL, NULL, NULL)
+    models <- list(NULL, NULL, NULL, NULL, NULL)
     try(models[[1]] <-     glm(formula, family, data, start = s1))
     try(models[[2]] <-    glm2(formula, family, data, start = s1))
-    try(models[[3]] <- glmmTMB(formula, data, family, start = list(beta = s1), REML = FALSE, na.action = na.exclude))
-    try(models[[4]] <- glmmTMB(formula, data, family, start = list(beta = s2), REML = FALSE, na.action = na.exclude))
+    try(models[[3]] <- glmmTMB(formula, data, family,                          REML = FALSE, na.action = na.exclude))
+    try(models[[4]] <- glmmTMB(formula, data, family, start = list(beta = s1), REML = FALSE, na.action = na.exclude))
+    try(models[[5]] <- glmmTMB(formula, data, family, start = list(beta = s2), REML = FALSE, na.action = na.exclude))
     return(glmx_best_model(models))
   }
 

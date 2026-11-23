@@ -66,11 +66,12 @@ Infrastructure and utility functions (skip ahead to example usage)
     s1[which(names(s1) != "(Intercept)")] <- 0.0
     s1[which(names(s1) == "(Intercept)")] <- mean(predict(lm(formula, data), type = "response"))
     if (family$link == "log") s1[which(names(s1) == "(Intercept)")] <- log(s1[which(names(s1) == "(Intercept)")])
-    models <- list(NULL, NULL, NULL, NULL)
+    models <- list(NULL, NULL, NULL, NULL, NULL)
     try(models[[1]] <-     glm(formula, family, data, start = s1))
     try(models[[2]] <-    glm2(formula, family, data, start = s1))
-    try(models[[3]] <- glmmTMB(formula, data, family, start = list(beta = s1), REML = FALSE, na.action = na.exclude))
-    try(models[[4]] <- glmmTMB(formula, data, family, start = list(beta = s2), REML = FALSE, na.action = na.exclude))
+    try(models[[3]] <- glmmTMB(formula, data, family,                          REML = FALSE, na.action = na.exclude))
+    try(models[[4]] <- glmmTMB(formula, data, family, start = list(beta = s1), REML = FALSE, na.action = na.exclude))
+    try(models[[5]] <- glmmTMB(formula, data, family, start = list(beta = s2), REML = FALSE, na.action = na.exclude))
     return(glmx_best_model(models))
   }
 
@@ -147,18 +148,18 @@ Regression models are adjusted for sex, age in years, income category, and insur
 
 ```{r example, warning = FALSE}
   # compute different regression models
-  m_Gauss     <-   lm(        cost ~ study_group + SEX + AGELAST + INCOME + INSURANCE, data = study_pop)                                    # Gaussian identity link, unmodified cost
-  m_Gamma_log <- glmx(       pcost ~ study_group + SEX + AGELAST + INCOME + INSURANCE, data = study_pop, family = Gamma(link = "log"))      # Gamma log link, cost shifted by 0.01 USD
-  m_Events    <- glmx_events(    N ~ study_group + SEX + AGELAST + INCOME + INSURANCE, data = study_pop)                                    # first stage: number of events
-  m_Ecosts    <- glmx_pcosts(ecost ~ study_group + SEX + AGELAST + INCOME + INSURANCE, data = study_pop %>% filter(N > 0))                  # second stage: cost per event, only if event
+  m_Gauss     <-   lm(        cost ~ study_group + SEX + AGELAST + INCOME + INSURANCE, data = study_pop)                               # Gaussian identity link, unmodified cost
+  m_Gamma_log <- glmx(       pcost ~ study_group + SEX + AGELAST + INCOME + INSURANCE, data = study_pop, family = Gamma(link = "log")) # Gamma log link, cost shifted by 0.01 USD
+  m_Events    <- glmx_events(    N ~ study_group + SEX + AGELAST + INCOME + INSURANCE, data = study_pop)                               # first stage: number of events
+  m_Ecosts    <- glmx_pcosts(ecost ~ study_group + SEX + AGELAST + INCOME + INSURANCE, data = study_pop %>% filter(N > 0))             # second stage: cost per event, only if event
 
   # check convergence and best AIC (arrays for glm* implementations from different packages) and identity-link vs. log-link
   print("Convergence:")
-  print(paste("Gamma log-link (glm, glm2, glmmTMB s1/s2):",          paste(m_Gamma_log$converged, collapse = ", ")))
+  print(paste("Gamma log-link (glm, glm2, glmmTMB raw/s1/s2):",      paste(m_Gamma_log$converged, collapse = ", ")))
   print(paste("Number of Events (Poisson identity-link, log-link):", paste(m_Events$converged,    collapse = ", ")))
   print(paste("Costs per event (Gamma identity-link, log-link):",    paste(m_Ecosts$converged,    collapse = ", ")))
   print("Best AIC:")
-  print(paste("Gamma log-link (glm, glm2, glmmTMB s1/s2):",          paste(m_Gamma_log$best_AIC, collapse = ", ")))
+  print(paste("Gamma log-link (glm, glm2, glmmTMB raw/s1/s2):",      paste(m_Gamma_log$best_AIC, collapse = ", ")))
   print(paste("Number of Events (Poisson identity-link, log-link):", paste(m_Events$best_AIC,    collapse = ", ")))
   print(paste("Costs per event (Gamma identity-link, log-link):",    paste(m_Ecosts$best_AIC,    collapse = ", ")))
 ```

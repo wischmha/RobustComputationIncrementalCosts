@@ -55,6 +55,11 @@ output:   word_document
   load("./DataGeneration.Rdata")
   load("./DataAnalysis.Rdata")
 
+  # report any simulation runs without a valid estimate for the cost difference
+  n_results  <- nrow(results)
+  n_expected <- n_sim * length(unique(results$f)) * length(unique(results$N)) * 8
+  results %>% filter(!complete.cases(.)) %>% flextable() %>% set_caption(sprintf("Missing information among %d results (of %d expected)", n_results, n_expected))
+
   plot_pdf_png("Figure_S1", 0.7, plot_width = 10,
     study_pops %>% filter(costs > 0) %>% mutate(events = factor(events)) %>%
     ggplot(aes(x = costs, group = events, fill = events)) +
@@ -76,12 +81,12 @@ output:   word_document
     # analyze robustness of different regression function implementations (already summed in data analysis across Gaussian log and Gamma models)
     res %>% filter(grepl("Two-Stage", model)) %>% select(N, returned, converged, valid_AIC, best_AIC) %>% separate_wider_delim(!N, delim = "/", names_sep = "") %>%
       group_by(N) %>% reframe(across(everything(), ~sum(as.integer(.x)))) %>% pivot_longer(!N, names_to = "Status") %>% pivot_wider(names_from = N, values_from = value) %>%
-      mutate(Model  = factor(str_replace_all(Status, c("[a-zA-Z_]*" = "")), levels = 1:4, labels = c("glm+start1", "glm2+start1", "glmmTMB+start1", "glmmTMB+start2"))) %>%
+      mutate(Model  = factor(str_replace_all(Status, c("[a-zA-Z_]*" = "")), levels = 1:5, labels = c("glm+start1", "glm2+start1", "glmmTMB", "glmmTMB+start1", "glmmTMB+start2"))) %>%
       mutate(Status = factor(str_replace_all(Status, c("[0-9]*"     = "")), levels = c("returned", "converged", "valid_AIC", "best_AIC"))) %>%
       select(Model, Status, everything()) %>% arrange(Model, Status) %>% mutate(Status = str_replace(Status, "best_AIC", "(co-)optimum")) %>%
       flextable() %>%
         set_caption(sprintf("Table S1 (%s): Convergence of Gauss(log) and Gamma regressions (perfect = %d)", m_name, 6 * n_sim)) %>%
-        autofit() %>% hline(c(4, 8, 12)) %>% align(j = -2:-1, align = "right", part = "body") %>% flextable_to_rmd()
+        autofit() %>% hline(c(4, 8, 12, 16)) %>% align(j = -2:-1, align = "right", part = "body") %>% flextable_to_rmd()
 
     # ensure reproducibility / comparability between regression models (bootstrapping)
     set.seed(314159)
