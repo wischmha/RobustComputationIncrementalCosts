@@ -2,7 +2,7 @@
 title:    "Patient-level simulation and model comparison for robust incremental cost estimation"
 subtitle: "Online Resource 5: Placebo study using MEPS data"
 author:   "Charité - Universitätsmedizin Berlin\n\nInstitute of Public Health\n\nPaula Filser, Hans-Aloys Wischmann, Toivo Glatz"
-date:     "** **\n\nEdited: 2026-11-21, Executed: `r Sys.Date()`"
+date:     "** **\n\nEdited: 2026-11-25, Executed: `r Sys.Date()`"
 output:   word_document
 ---
 
@@ -230,7 +230,7 @@ We used a "placebo design" with real data: persons were randomly allocated two g
                                            RMSE = rmsq_ci(    costdiff)) %>%
     pivot_longer(-c(N, Model), names_to = "Metric") %>% pivot_wider(names_from = Model, values_from = value) %>%
     mutate(Type = ifelse(N != nrow(study_pop), "RCT", "Registry")) %>% select(Type, N, Metric, everything()) %>%
-    flextable() %>% set_caption(sprintf("Placebo study (MEPS 2022-2024): Metrics in USD [99%%-CI], N_SIM=%d", N_sim)) %>% autofit() %>% hline(3)
+    flextable() %>% set_caption(sprintf("Placebo study (MEPS 2024): Metrics in USD [99%%-CI], N_SIM=%d", N_sim)) %>% autofit() %>% hline(3)
 ```
 
 ## Figure
@@ -244,7 +244,7 @@ We used a "placebo design" with real data: persons were randomly allocated two g
       geom_boxplot(width = 0.15, outlier.shape = NA, fill = "white", color = "grey20") +
       stat_summary(fun = mean, geom = "point", orientation = "y", shape = 23, size = 2.5, fill = "black") +
       scale_fill_brewer(palette = "Set2") +
-      labs(x = "Estimated cost difference [USD] (true value = 0.00 USD)", y = NULL, title = "Placebo study (MEPS 2022-2024)",
+      labs(x = "Estimated cost difference [USD] (true value = 0.00 USD)", y = NULL, title = "Placebo study (MEPS 2024)",
            subtitle = sprintf("%d random allocations; diamond = mean (bias), box = median and IQR", N_sim)) +
       theme_minimal(base_size = 11) +
       theme(legend.position = "none", panel.grid.minor = element_blank(), plot.title = element_text(face = "bold")) + facet_wrap(~N, ncol = 1))
